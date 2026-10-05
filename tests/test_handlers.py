@@ -93,7 +93,7 @@ class HandlersTest(AsyncHTTPTestCase):
             await self.provider.put('courses',{'id':'a'},actor='admin')
             await self.provider.put('courses',{'id':'b'},actor='admin')
             await self.provider.put('groups',{'id':'ga','course_id':'a'},actor='admin')
-            await self.provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True}],actor='admin')
+            await self.provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True,'verified':True}],actor='admin')
             await self.provider.put('memberships',{'id':'m','course_id':'a','group_id':'ga','person_id':'alice','canonical_person_id':'00000000-0000-4000-8000-000000000001'},actor='admin')
             await self.provider.put('workspaces',{'id':'w','course_id':'a','group_id':'ga','state':'running'},actor='admin')
         self.io_loop.run_sync(seed)
@@ -142,7 +142,7 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(self.fetch('/records/courses',method='POST',body='{invalid').code,400)
         self.assertEqual(self.fetch('/records/courses',method='DELETE',body=json.dumps({'id':'c'}),allow_nonstandard_methods=True).code,400)
         self.hub_failure=True
-        self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,500)
+        self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,503)
         self.admin=False
         self.assertEqual(self.fetch('/records/groups',method='POST',body=json.dumps({'id':'bad','course_id':'c'})).code,403)
         entries=[r for r in self.provider.audit() if r['kind'].startswith('http:')]

@@ -19,7 +19,7 @@ class OAuthTest(AsyncHTTPTestCase):
 
     def test_redirect_rejects_external_and_accepts_local(self):
         from urllib.parse import urlencode
-        for url in ['https://evil.example/', '//evil.example/', '/\\evil.example/']:
+        for url in ['https://evil.example/', '//evil.example/', '/\\evil.example/', '/%5cevil.example/', '/%252f%252fevil.example/', '/%0d%0aLocation:evil']:
             response = self.fetch('/redirect?' + urlencode({'next':url}), follow_redirects=False)
             self.assertEqual(response.code, 400)
         response = self.fetch('/redirect?next=/services/admin/app', follow_redirects=False)

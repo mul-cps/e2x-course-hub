@@ -51,6 +51,7 @@ class WorkspaceHandler(RecordsHandler):
         except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
         except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
+        except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
         except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
         self.write({'workspace':await service.get(identifier)})
 
@@ -107,11 +108,17 @@ class WorkspaceCreateHandler(RecordsHandler):
         if any(w['id']==data['id'] for w in await provider.list('workspaces')):
             raise web.HTTPError(409,reason='Workspace already exists')
         course=next((c for c in await provider.courses() if c['id']==data['course_id']),None)
-        binding={key:data[key] for key in ('group_id','hub_user','hub_server')}
-        if not course or course.get('resource_ceiling') != data['course_ceiling'] or binding not in course.get('workspace_bindings',[]):
+        bindings=[b for b in (course or {}).get('workspace_bindings',[]) if all(b.get(k)==data[k] for k in ('group_id','hub_user','hub_server'))]
+        binding=bindings[0] if len(bindings)==1 else None
+        if not course or course.get('resource_ceiling') != data['course_ceiling'] or binding is None:
             raise web.HTTPError(403,reason='Use administrator-controlled course ceiling and neutral-account binding')
         groups = await provider.groups(data['course_id'])
-        if not any(g['id']==data['group_id'] for g in groups): raise web.HTTPError(400,reason='Unknown owned course group')
+        group=next((g for g in groups if g['id']==data['group_id']),None)
+        if group is None: raise web.HTTPError(400,reason='Unknown owned course group')
+        if group.get('assignment_id'):
+            assignment=next((a for a in await provider.list('assignments') if a['id']==group['assignment_id']),None)
+            if not assignment or assignment.get('state','open')!='open' or assignment.get('archive_pending'):
+                raise web.HTTPError(409,reason='Assignment is closing or closed')
         try:
             members = await service.members(data)
             await service.compute.validate_workspace(data['id'],members,data['profile'],data['course_ceiling'])
@@ -132,13 +139,13 @@ class AssignmentCloseHandler(RecordsHandler):
         if not assignment: raise web.HTTPError(404)
         actor=await self.authorize(assignment['course_id'],assignment.get('term_id'))
         if assignment.get('source') != 'local': raise web.HTTPError(403,reason='External assignment is read-only')
-        groups = {g['id'] for g in await provider.groups(assignment['course_id']) if g.get('assignment_id')==identifier}
-        for workspace in await provider.list('workspaces'):
-            if workspace.get('group_id') in groups:
-                await service.close(workspace['id'],actor=actor,archive=True)
-        await provider.put('assignments',{**assignment,'state':'closed','archive_pending':True},actor=actor)
-        self.write({'assignment':identifier,'state':'closed','archive_pending':True,
-                    'notice':'Associated shared writers stopped; files retained. Read-only filesystem archive remains an operator gate.'})
+        try:
+            result = await service.close_assignment(assignment,actor=actor)
+        except RuntimeError as error:
+            raise web.HTTPError(503,reason=str(error))
+        except (TimeoutError,HTTPClientError) as error:
+            raise web.HTTPError(409,reason='Writer shutdown or reservation release not confirmed')
+        self.write({'assignment':result,'notice':'Verified read-only archive; files retained.'})
 
 default_handlers.append((r'/api/assignments/([^/]+)/close',AssignmentCloseHandler))
 

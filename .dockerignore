@@ -1,0 +1,10 @@
+.git
+.venv
+node_modules
+**/node_modules
+graft
+__pycache__
+**/__pycache__
+dist
+*.sqlite*
+.env

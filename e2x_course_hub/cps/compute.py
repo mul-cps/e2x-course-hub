@@ -32,16 +32,27 @@ class ComputePolicyClient:
         payload = {key: value for key, value in grant.items() if key != 'source'}
         return await self._request('grants', 'PUT', payload)
 
-    async def acquire(self, workspace, canonical_members, *, profile, ceiling, actor):
-        return await self._request('reservations/acquire', 'POST', {
-            'workspace': workspace, 'members': canonical_members, 'profile':profile, 'ceiling':ceiling, 'actor': actor})
+    async def register_workspace(self, workspace, members, validation):
+        required = ('namespace', 'pod')
+        if any(not workspace.get(key) for key in required):
+            raise ValueError('Operator-qualified namespace and preserved Pod name required')
+        return await self._request('workspaces', 'PUT', {
+            'workspace': workspace['id'], 'owner': workspace['hub_user'],
+            'server': workspace['hub_server'], 'members': members,
+            'principal': 'workspace:' + self.console + ':' + workspace['id'],
+            'profiles': [workspace['profile']], 'ceiling': workspace['course_ceiling'],
+            'namespace': workspace['namespace'], 'pod': workspace['pod'],
+            'policy_hash': validation['policy_hash']})
 
-    async def release_after_shutdown(self, workspace, *, confirmed_by_hub, actor):
-        # This boolean must come from a trusted Hub adapter poll, never a browser request.
+    async def reservation_state(self, workspace):
+        return await self._request("reservations/" + quote(workspace, safe=""))
+
+    async def release_after_shutdown(self, workspace, *, confirmed_by_hub, actor, attempt=None):
         if confirmed_by_hub is not True:
-            raise ValueError('Hub shutdown confirmation required before releasing reservations')
-        return await self._request('reservations/release', 'POST', {
-            'workspace': workspace, 'shutdown_confirmed': True, 'actor': actor})
+            raise ValueError('Hub shutdown confirmation required')
+        # Hub post-stop owns the persisted attempt. This idempotent probe cannot
+        # force-release its reservation; the gateway observes actual Pod absence.
+        return await self._request('reservations/release', 'POST', {'workspace': workspace, 'attempt': attempt})
 
     async def validate_workspace(self, workspace, members, profile, ceiling):
         return await self._request('workspace-policy', 'POST', {'workspace': workspace,

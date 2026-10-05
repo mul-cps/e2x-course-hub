@@ -49,6 +49,9 @@ docs = [
   "pydata-sphinx-theme",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.version]
 path = "e2x_course_hub/__about__.py"
 

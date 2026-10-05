@@ -3,7 +3,7 @@ import base64
 import contextvars
 import hashlib
 import secrets
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, unquote
 from jupyterhub.services.auth import HubOAuth, HubOAuthCallbackHandler
 from tornado import web
 from tornado.httputil import url_concat
@@ -69,7 +69,11 @@ class SafeOAuthCallbackHandler(HubOAuthCallbackHandler):
             if reset is not None: _verifier.reset(reset)
 
     def redirect(self, url, permanent=False, status=None):
-        parsed = urlsplit(url)
-        if parsed.scheme or parsed.netloc or not url.startswith('/') or '\\' in url:
+        decoded = url
+        for _ in range(3):
+            decoded = unquote(decoded)
+        parsed = urlsplit(decoded)
+        if (parsed.scheme or parsed.netloc or not decoded.startswith('/') or decoded.startswith('//') or '\\' in decoded
+                or any(ord(char) < 32 or ord(char) == 127 for char in decoded)):
             raise web.HTTPError(400, reason='OAuth redirect must be a local absolute path')
         return super().redirect(url, permanent=permanent, status=status)

@@ -9,7 +9,7 @@ class IdentityTest(unittest.TestCase):
     def test_explicit_verified_email_links_cross_hub_aliases(self):
         mapping=reviewed_email_mapping([
             {'hub':'cps','username':'old-cps','email':' Person@Example.edu ','person_id':'00000000-0000-4000-8000-000000000001','verified':True},
-            {'hub':'cit','username':'old-cit','email':'person@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True}])
+            {'hub':'cit','username':'old-cit','email':'person@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True,'verified':True}])
         self.assertEqual(mapping[('cps','old-cps')],mapping[('cit','old-cit')])
 
     def test_missing_unverified_and_duplicate_maps_rejected(self):
@@ -29,7 +29,7 @@ class IdentityTest(unittest.TestCase):
                 await provider.put('courses',{'id':'c'},actor='admin')
                 record={'id':'old-membership','course_id':'c','person_id':'old-user','canonical_person_id':'00000000-0000-4000-8000-000000000001'}
                 with self.assertRaises(ValueError):await provider.put('memberships',record,actor='teacher')
-                await provider.link_identities([{'hub':'cps','username':'old-user','email':'Person@Example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True}],actor='admin')
+                await provider.link_identities([{'hub':'cps','username':'old-user','email':'Person@Example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True,'verified':True}],actor='admin')
                 await provider.put('memberships',record,actor='teacher')
                 self.assertEqual((await provider.members('c'))[0]['person_id'],'old-user')
                 with self.assertRaises(ValueError):await provider.link_identities([{'hub':'cps','username':'old-user','email':'other@example.edu','person_id':'00000000-0000-4000-8000-000000000001','verified':True}],actor='admin')
@@ -51,7 +51,7 @@ class IdentityTest(unittest.TestCase):
                 old=provider.db.execute('SELECT canonical_person_id FROM email_links').fetchone()
                 self.assertIsNone(old['canonical_person_id'])
                 with self.assertRaises(ValueError):await provider.link_identities([{'hub':'cps','username':'old-user','email':'person@example.edu','person_id':person,'verified':True}],actor='admin')
-                await provider.link_identities([{'hub':'cps','username':'old-user','email':'person@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                await provider.link_identities([{'hub':'cps','username':'old-user','email':'person@example.edu','person_id':person,'administrator_reviewed':True,'verified':True}],actor='admin')
                 record=(await provider.members('course-original'))[0]
                 self.assertEqual(record['id'],'membership-original')
                 self.assertEqual(record['person_id'],'old-user')
@@ -65,11 +65,11 @@ class IdentityTest(unittest.TestCase):
             provider=LocalCourseProvider(Path(tmp)/'db','cps')
             person='00000000-0000-4000-8000-000000000001'
             async def run():
-                await provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                await provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','person_id':person,'administrator_reviewed':True,'verified':True}],actor='admin')
                 with self.assertRaisesRegex(ValueError,'duplicate canonical'):
-                    await provider.link_identities([{'hub':'cps','username':'bob','email':'bob@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                    await provider.link_identities([{'hub':'cps','username':'bob','email':'bob@example.edu','person_id':person,'administrator_reviewed':True,'verified':True}],actor='admin')
                 self.assertIsNone(provider.db.execute('SELECT username FROM email_links WHERE username=?',('bob',)).fetchone())
-                await provider.link_identities([{'hub':'cps','username':'alice','email':'new-alice@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                await provider.link_identities([{'hub':'cps','username':'alice','email':'new-alice@example.edu','person_id':person,'administrator_reviewed':True,'verified':True}],actor='admin')
                 linked=provider.db.execute('SELECT email,canonical_person_id FROM email_links WHERE username=?',('alice',)).fetchone()
                 self.assertEqual(linked['canonical_person_id'],person)
                 self.assertEqual(linked['email'],'new-alice@example.edu')

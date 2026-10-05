@@ -104,6 +104,8 @@ class CourseServiceApp(Application):
     database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
     course_providers = Dict(default_value={'local': {'enabled': True}, 'moodle': {'enabled': False}}, help='Course provider configuration').tag(config=True)
 
+    filesystem_adapter_class = Unicode("", help="Operator-qualified archive adapter dotted class path; empty fails closed").tag(config=True)
+
     def init_tornado_settings(self):
         CPSHubOAuth.instance().pkce_enabled = self.oauth_pkce
         CPSHubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
@@ -122,7 +124,11 @@ class CourseServiceApp(Application):
         workspace_service = None
         if self.compute_policy_url:
             compute = ComputePolicyClient(self.compute_policy_url, self.compute_policy_token, self.console_owner)
-            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api))
+            filesystem = None
+            if self.filesystem_adapter_class:
+                from traitlets.utils.importstring import import_item
+                filesystem = import_item(self.filesystem_adapter_class)()
+            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api), filesystem=filesystem)
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))
         settings = {
             "api": api,

@@ -12,8 +12,8 @@ def reviewed_email_mapping(rows):
             raise ValueError('explicit hub and existing username required')
         if not isinstance(email,str) or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email.strip()):
             raise ValueError('explicit valid email required; usernames are not identity authority')
-        if row.get('verified') is not True and row.get('administrator_reviewed') is not True:
-            raise ValueError('email mapping must be verified or explicitly administrator reviewed')
+        if row.get('verified') is not True:
+            raise ValueError('email verification is required before person linkage; administrator review alone is insufficient')
         try:person=str(uuid.UUID(row.get('person_id','')))
         except (ValueError,TypeError,AttributeError):raise ValueError('explicit canonical person_id UUID required')
         email=email.strip().casefold()

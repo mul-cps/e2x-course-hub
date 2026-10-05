@@ -13,6 +13,8 @@ class WorkspaceBinding(BaseModel):
     group_id:str
     hub_user:str
     hub_server:str
+    namespace: Optional[str] = None
+    pod: Optional[str] = None
 
 class Course(Record):
     name: str = ''
@@ -59,6 +61,8 @@ class Assignment(Child):
     groups: Dict[str,List[str]] = Field(default_factory=dict)
     state: str = 'open'
     archive_pending: bool = False
+    archived: bool = False
+    archive_evidence: Optional[Dict[str,Any]] = None
 
 class Workspace(Child):
     group_id: str
@@ -70,6 +74,10 @@ class Workspace(Child):
     archive_pending: bool = False
     archived: bool = False
     notice: Optional[str] = None
+    namespace: Optional[str] = None
+    pod: Optional[str] = None
+    assignment_id: Optional[str] = None
+    archive_evidence: Optional[Dict[str,Any]] = None
 
 MODELS = dict(courses=Course,terms=Term,memberships=Membership,groups=Group,groupings=Grouping,
               projects=Project,assignments=Assignment,workspaces=Workspace)
@@ -107,8 +115,8 @@ async def validate(provider,kind,record):
     if len(result.get('group_ids',[]))!=len(set(result.get('group_ids',[]))):
         raise ValueError('duplicate group references')
     if kind=='memberships' and result.get('canonical_person_id') is not None:
-        linked=provider.db.execute('SELECT canonical_person_id FROM email_links WHERE console=? AND username=?',
+        linked=provider.db.execute('SELECT canonical_person_id,verified FROM email_links WHERE console=? AND username=?',
             (provider.console,result['person_id'])).fetchone()
-        if not linked or linked['canonical_person_id']!=result['canonical_person_id']:
+        if not linked or linked['verified'] != 1 or linked['canonical_person_id']!=result['canonical_person_id']:
             raise ValueError('membership canonical UUID requires an explicit verified/reviewed account mapping')
     return result

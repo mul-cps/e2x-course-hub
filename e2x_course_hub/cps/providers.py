@@ -47,9 +47,21 @@ class LocalCourseProvider:
         self._importing = False
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
-        if self.db.execute('PRAGMA user_version').fetchone()[0]>3:
+        if self.db.execute('PRAGMA user_version').fetchone()[0]>5:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
+        tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        owners = set()
+        if 'records' in tables:
+            owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM records'))
+        for table in ('email_links','audit'):
+            if table in tables:
+                owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM '+table))
+        if 'console_owner' in tables:
+            owners.update(row[0] for row in self.db.execute('SELECT owner FROM console_owner'))
+        if owners - {console}:
+            self.db.close()
+            raise ValueError('CPS and CIT require separate console SQLite databases')
         with self.db:
             self.db.executescript('''
                 BEGIN IMMEDIATE;
@@ -63,10 +75,18 @@ class LocalCourseProvider:
                     actor TEXT NOT NULL, console TEXT NOT NULL, kind TEXT NOT NULL,
                     target TEXT NOT NULL, previous TEXT, current TEXT,
                     time TEXT NOT NULL, outcome TEXT NOT NULL);
-                PRAGMA user_version=3;
+                CREATE TABLE IF NOT EXISTS console_owner (owner TEXT PRIMARY KEY);
+                PRAGMA user_version=5;
             ''')
+            owners = {row[0] for row in self.db.execute('SELECT DISTINCT console FROM records')}
+            owners.update(row[0] for row in self.db.execute('SELECT owner FROM console_owner'))
+            if owners - {console}:
+                raise ValueError('CPS and CIT require separate console SQLite databases')
+            self.db.execute('INSERT OR IGNORE INTO console_owner VALUES (?)', (console,))
             if 'canonical_person_id' not in {row[1] for row in self.db.execute('PRAGMA table_info(email_links)')}:
                 self.db.execute('ALTER TABLE email_links ADD COLUMN canonical_person_id TEXT')
+            if 'verified' not in {row[1] for row in self.db.execute('PRAGMA table_info(email_links)')}:
+                self.db.execute('ALTER TABLE email_links ADD COLUMN verified INTEGER NOT NULL DEFAULT 0')
             self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS email_links_canonical ON email_links(console,canonical_person_id)')
 
     async def list(self, kind, course_id=None):
@@ -182,7 +202,7 @@ class LocalCourseProvider:
                         raise ValueError('existing canonical person reassignment requires a separate reviewed migration')
                     if (previous['email']!=email or previous['canonical_person_id'] is None) and proofs[(hub,username)].get('administrator_reviewed') is not True:
                         raise ValueError('email/UUID handover requires explicit administrator-reviewed mapping')
-                self.db.execute('INSERT INTO email_links(console,username,email,canonical_person_id) VALUES (?,?,?,?) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,canonical_person_id=excluded.canonical_person_id',(hub,username,email,person))
+                self.db.execute('INSERT INTO email_links(console,username,email,canonical_person_id,verified) VALUES (?,?,?,?,1) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,canonical_person_id=excluded.canonical_person_id,verified=1',(hub,username,email,person))
                 for row in self.db.execute("SELECT id,payload FROM records WHERE console=? AND kind='memberships'",(hub,)).fetchall():
                     membership=json.loads(row['payload'])
                     if membership['person_id']!=username:continue

@@ -443,3 +443,66 @@ Contributions are welcome! Please:
 
 - **Issues**: https://github.com/Digiklausur/e2x-course-hub/issues
 - **Documentation**: https://github.com/Digiklausur/e2x-course-hub#readme
+## Qualified local collaboration deployment contract
+
+Shared workspace starts validate current central policy, register the source-owned
+workspace, then POST only its fixed profile to Hub. GPU reservations are acquired
+exclusively by the Hub pre-spawn adapter. Stops capture the source-owned reservation
+attempt before requesting Hub shutdown, then ask the gateway to release that exact
+attempt. The gateway independently verifies Hub and Kubernetes Pod absence; a 409
+retains capacity. Console assertions cannot force release.
+
+Each administrator-owned course `workspace_bindings` entry supplies exact
+`group_id`, `hub_user`, `hub_server`, `namespace`, and `pod`. Preserve existing
+Spawner-derived names, slugs, PVCs and NFS locations when qualifying these values.
+Do not infer Pod names from usernames. Provision dedicated neutral Hub users through
+operator-controlled Hub RBAC with role `cps-workspace-kernel`; the central gateway
+verifies that role and rejects owners present in personal canonical mappings.
+Browser visitors keep their existing usernames and separate identities. The console
+does not grant this operator role itself.
+
+Configure `CourseServiceApp.filesystem_adapter_class` to an operator-owned dotted
+Python class import. Its async `provision(workspace, actor=...)` must provision or
+verify the exact existing storage, ownership and writable group mount without
+renaming or deleting files. Its async `archive(workspaces, actor=...)` must identify
+**all** storage writers, prove their shutdown (including writers outside Hub),
+apply read-only enforcement at the filesystem/storage boundary, test denied writes
+through every retained mount, preserve all files and return a dict containing
+`read_only_verified: true` plus nonempty `evidence` references. Partial failures
+must be retryable and must not restore write access. The adapter is trusted operator
+code, never browser input; an empty class fails closed. A DB flag is not filesystem
+enforcement. Assignment closure first prevents restarts, stops all associated shared
+servers and revokes Shares; missing/failed archive qualification returns 503 with
+`archive_pending` retained. Explicit Stop does not clear an archive pending barrier.
+
+`providers.reconcile(provider, sink)` passes normalized course/member/group/grouping
+snapshots to the same `WorkspaceService.reconcile_snapshot(snapshot, actor=...)`
+sink for local and future read-only providers. Reconciliation interrupts existing
+visitors before membership/Shares recalculation and current registry updates. Missing
+verified canonical members or operator bindings fail closed. Moodle remains visibly
+planned: disabled initialization has no network/secrets/timers; enabling it fails
+startup. No Moodle implementation is implied by a fake-provider test.
+
+Person linkage requires separately verified institutional email (`verified: true`)
+and explicit canonical UUID. Administrator review is additionally required for
+existing email/UUID handover and does not replace verification. No SMTP is configured
+or contacted, and no cross-Hub identity is automatically inferred. Schema v5 retains
+legacy account/reference records but marks pre-v5 email proofs unverified until an
+explicit verified mapping is reapplied. Shared writers using those mappings remain
+blocked meanwhile.
+
+Use distinct CPS and CIT deployment/config/SQLite paths and OAuth clients, callback
+URLs, cookie paths and private tokens. Database ownership is persistent and opening
+a CPS DB as CIT fails before migration. Before upgrade use the provider's SQLite
+online `backup(path)` API into a restricted persistent backup volume; retain the
+matching application image/config version and verify restoring it into an isolated
+same-console DB. Never copy an open SQLite file without its journal. Current schema
+is v5; older applications must not downgrade it.
+
+The source-built `Dockerfile` uses digest-pinned official Python/Node manifest
+indexes, builds frontend assets and a wheel, installs runtime wheels, runs as UID
+10001, and persists `/data`. Mount a console-specific `/etc/console/app.py` read-only;
+configure SQLite/config paths inside that console's `/data`. Supply secrets privately
+and only route through existing Hub service endpoints. Run image qualification and
+storage permissions/backup restore checks before deployment; this change does not
+publish an image or deploy services.

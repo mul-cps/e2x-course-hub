@@ -25,10 +25,13 @@ class WorkspaceTests(unittest.TestCase):
             p=LocalCourseProvider(Path(tmp)/'db','cps')
             calls=[]
             class Compute:
-                async def validate_workspace(self,*args):calls.append('validate')
-                async def acquire(self,*args,**kwargs):calls.append('acquire')
+                async def validate_workspace(self,*args):
+                    calls.append('validate'); return {'policy_hash':'test-hash'}
+                async def register_workspace(self,*args,**kwargs):calls.append('register')
+                async def reservation_state(self,*args):return {'attempt':'attempt'}
                 async def release_after_shutdown(self,*args,**kwargs):calls.append('release')
             class Hub:
+                async def assert_stopped(self,*args):pass
                 async def stop_confirmed(self,w):
                     calls.append('stop')
                     if stop_failure:raise TimeoutError()
@@ -37,22 +40,24 @@ class WorkspaceTests(unittest.TestCase):
                 async def sync_group(self,*args):calls.append('sync')
                 async def start(self,*args):calls.append('spawn')
             hub=Hub();hub.hub=hub
-            service=WorkspaceService(p,Compute(),hub)
+            class Filesystem:
+                async def provision(self,*args,**kwargs):pass
+            service=WorkspaceService(p,Compute(),hub,filesystem=Filesystem())
             async def run():
-                await p.put('courses',{'id':'c','resource_ceiling':{}},actor='admin')
+                await p.put('courses',{'id':'c','resource_ceiling':{},'workspace_bindings':[{'group_id':'g','hub_user':'neutral','hub_server':'rtc','namespace':'trusted','pod':'preserved'}]},actor='admin')
                 await p.put('groups',{'id':'g','course_id':'c'},actor='admin')
-                await p.link_identities([{'hub':'cps','username':'old-name','email':'person1@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True}],actor='admin')
+                await p.link_identities([{'hub':'cps','username':'old-name','email':'person1@example.edu','person_id':'00000000-0000-4000-8000-000000000001','administrator_reviewed':True,'verified':True}],actor='admin')
                 await p.put('memberships',{'id':'m','course_id':'c','group_id':'g','person_id':'old-name','canonical_person_id':'00000000-0000-4000-8000-000000000001'},actor='admin')
-                await p.put('workspaces',{'id':'w','course_id':'c','group_id':'g','profile':'shared-5','course_ceiling':{}},actor='admin')
+                await p.put('workspaces',{'id':'w','course_id':'c','group_id':'g','profile':'shared-5','course_ceiling':{},'hub_user':'neutral','hub_server':'rtc'},actor='admin')
                 if stop_failure:
                     with self.assertRaises(TimeoutError):await service.remove_member('w','m',actor='admin')
                     self.assertEqual(len(await p.members('c')),1)
                     self.assertEqual(calls,['stop'])
                 else:
                     await service.start('w',actor='admin')
-                    self.assertEqual(calls[:5],['validate','acquire','sync','spawn','shares'])
+                    self.assertEqual(calls[:5],['validate','register','sync','spawn','shares'])
                     await service.remove_member('w','m',actor='admin')
-                    self.assertEqual(calls[5:],['stop','revoke','shares','release'])
+                    self.assertEqual(calls[5:],['stop','release','revoke','shares'])
                     self.assertEqual(await p.members('c'),[])
                     self.assertIn('Files retained',(await service.get('w'))['notice'])
                     with self.assertRaises(ValueError):await service.start('w',actor='admin')
