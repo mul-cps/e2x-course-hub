@@ -1,4 +1,5 @@
 """Source-neutral local course records. No Moodle client is imported or initialized."""
+from contextlib import nullcontext
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ class LocalCourseProvider:
         if console not in ('cps', 'cit'):
             raise ValueError('console must be cps or cit')
         self.console = console
+        self._importing = False
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         with self.db:
@@ -71,7 +73,7 @@ class LocalCourseProvider:
             exists = self.db.execute("SELECT 1 FROM records WHERE console=? AND kind='courses' AND id=?", (self.console, course_id)).fetchone()
             if not exists: raise ValueError('course reference does not exist in this console')
         payload = json.dumps(record, sort_keys=True)
-        with self.db:
+        with (nullcontext() if self._importing else self.db):
             self.db.execute('INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?)', (self.console, kind, identifier, payload))
             self._audit(actor, kind, identifier, previous['payload'] if previous else None, payload)
         return record
@@ -103,9 +105,13 @@ class LocalCourseProvider:
     async def migrate_local(self, records, *, actor):
         """Explicit import preserves IDs and all workspace references; never match names."""
         with self.db:
-            for kind in KINDS:
-                for record in records.get(kind, []):
-                    await self.put(kind, record, actor=actor)
+            self._importing = True
+            try:
+                for kind in KINDS:
+                    for record in records.get(kind, []):
+                        await self.put(kind, record, actor=actor)
+            finally:
+                self._importing = False
 
     def backup(self, path):
         with sqlite3.connect(str(path)) as target:

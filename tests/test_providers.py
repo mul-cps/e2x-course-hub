@@ -59,3 +59,15 @@ class UpstreamMigrationTest(unittest.TestCase):
             asyncio.run(run())
         self.assertEqual(metadata.source, 'local')
         self.assertEqual(term.source, 'local')
+
+class ImportAtomicityTest(unittest.TestCase):
+    def test_invalid_child_rolls_back_entire_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = LocalCourseProvider(Path(tmp)/'db', 'cps')
+            async def run():
+                with self.assertRaises(ValueError):
+                    await provider.migrate_local({'courses': [{'id':'c'}], 'memberships':[{'id':'m','course_id':'missing'}]}, actor='migration')
+                self.assertEqual(await provider.courses(), [])
+                self.assertEqual(provider.audit(), [])
+            asyncio.run(run())
+            provider.db.close()
