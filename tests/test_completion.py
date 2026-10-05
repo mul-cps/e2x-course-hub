@@ -160,6 +160,56 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         await self.service.start('w',actor='teacher')
         self.assertIn('spawn',self.calls)
 
+    async def test_late_sibling_create_start_waits_for_blocked_course_reconciliation(self):
+        course=(await self.provider.courses())[0]
+        binding={**course['workspace_bindings'][0],'hub_server':'rtc2'}
+        await self.provider.put('courses',{**course,'workspace_bindings':course['workspace_bindings']+[binding]},actor='admin')
+        snapshot={'course':course,'groups':[{'id':'g'}],
+                  'members':await self.provider.members('c'),'groupings':[]}
+        workspace_lock=self.service.locks.setdefault('w',asyncio.Lock())
+        await workspace_lock.acquire()
+        reconciliation=asyncio.create_task(self.service.reconcile_snapshot(snapshot,actor='reconciler'))
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if (await self.provider.courses())[0].get('reconciliation_pending'):break
+            self.assertTrue((await self.provider.courses())[0]['reconciliation_pending'])
+            async def spawn(workspace):
+                self.assertEqual((await self.service.get(workspace['id']))['state'],'starting')
+                self.calls.append('spawn:'+workspace['id'])
+            self.hub.start=spawn
+            async def late_writer():
+                await self.service.create({'id':'w2','course_id':'c','group_id':'g',
+                    'hub_user':'neutral','hub_server':'rtc2','profile':'cpu','course_ceiling':{}},actor='admin')
+                await self.service.start('w2',actor='teacher')
+            late=asyncio.create_task(late_writer())
+            await asyncio.sleep(0)
+            self.assertFalse(late.done())
+            self.assertFalse(any(w['id']=='w2' for w in await self.provider.list('workspaces')))
+            self.assertEqual(self.calls,[])
+        finally:
+            workspace_lock.release()
+        await asyncio.wait_for(asyncio.gather(reconciliation,late),2)
+        self.assertLess(self.calls.index('sync'),self.calls.index('spawn:w2'))
+        self.assertIn('stop:w',self.calls)
+        self.assertFalse((await self.provider.courses())[0]['reconciliation_pending'])
+
+    async def test_writer_snapshot_is_collected_after_course_serialization(self):
+        lock=self.service.course_locks.setdefault('c',asyncio.Lock())
+        await lock.acquire()
+        course=(await self.provider.courses())[0]
+        snapshot={'course':course,'groups':[{'id':'g'}],
+                  'members':await self.provider.members('c'),'groupings':[]}
+        reconciliation=asyncio.create_task(self.service.reconcile_snapshot(snapshot,actor='reconciler'))
+        await asyncio.sleep(0)
+        workspace=await self.service.get('w')
+        await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')
+        await self.provider.put('courses',{**course,'workspace_bindings':course['workspace_bindings']+
+            [{**course['workspace_bindings'][0],'hub_server':'rtc2'}]},actor='admin')
+        lock.release()
+        await asyncio.wait_for(reconciliation,2)
+        self.assertLess(self.calls.index('stop:w2'),self.calls.index('sync'))
+
     async def test_empty_assignment_cannot_claim_read_only_archive(self):
         await self.provider.put('assignments',{'id':'empty','course_id':'c','mode':'manual'},actor='admin')
         assignment=next(a for a in await self.provider.list('assignments') if a['id']=='empty')

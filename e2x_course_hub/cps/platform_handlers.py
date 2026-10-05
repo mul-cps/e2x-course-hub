@@ -120,10 +120,9 @@ class WorkspaceCreateHandler(RecordsHandler):
             if not assignment or assignment.get('state','open')!='open' or assignment.get('archive_pending'):
                 raise web.HTTPError(409,reason='Assignment is closing or closed')
         try:
-            members = await service.members(data)
-            await service.compute.validate_workspace(data['id'],members,data['profile'],data['course_ceiling'])
-            await provider.put('workspaces',{**data,'state':'stopped'},actor=actor)
+            await service.create(data,actor=actor)
         except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
+        except PermissionError as error: raise web.HTTPError(403,reason=str(error))
         except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected profile')
         self.write({'workspace':data['id']})
 

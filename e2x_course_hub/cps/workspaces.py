@@ -18,6 +18,19 @@ def audited_lifecycle(method):
             raise
     return wrapped
 
+def course_serialized(method):
+    @wraps(method)
+    async def wrapped(self, identifier, *args, **kwargs):
+        if isinstance(identifier,dict):
+            course_id = identifier.get('course_id') or identifier.get('course',{}).get('id')
+        else:
+            course_id = (await self.get(identifier))['course_id']
+        if not course_id:
+            raise ValueError('Owned course required for lifecycle serialization')
+        async with self.course_locks.setdefault(course_id,asyncio.Lock()):
+            return await method(self,identifier,*args,**kwargs)
+    return wrapped
+
 class HubWorkspaceAdapter:
     def __init__(self, hub_api, *, timeout=120):
         self.hub = hub_api
@@ -93,6 +106,7 @@ class WorkspaceService:
     def __init__(self, provider, compute, hub, *, filesystem=None):
         self.provider, self.compute, self.hub = provider,compute,hub
         self.locks = {}
+        self.course_locks = {}
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
 
     async def get(self, identifier):
@@ -116,6 +130,31 @@ class WorkspaceService:
         return sorted(set(people))
 
     @audited_lifecycle
+    @course_serialized
+    async def create(self, data, *, actor):
+        # Re-read authoritative records under the same lock used by starts/reconcile.
+        course = next((c for c in await self.provider.courses() if c['id']==data['course_id']),None)
+        if not course or course.get('reconciliation_pending'):
+            raise ValueError('Course is missing or has an unresolved reconciliation barrier')
+        if any(w['id']==data['id'] for w in await self.provider.list('workspaces')):
+            raise ValueError('Workspace already exists')
+        bindings = [b for b in course.get('workspace_bindings',[]) if
+                    all(b.get(k)==data.get(k) for k in ('group_id','hub_user','hub_server'))]
+        if len(bindings)!=1 or course.get('resource_ceiling') != data.get('course_ceiling'):
+            raise PermissionError('Exact administrator-controlled workspace binding and ceiling required')
+        group = next((g for g in await self.provider.groups(data['course_id']) if g['id']==data['group_id']),None)
+        if group is None:
+            raise ValueError('Owned group required')
+        if group.get('assignment_id'):
+            assignment=next((a for a in await self.provider.list('assignments') if a['id']==group['assignment_id']),None)
+            if not assignment or assignment.get('state','open')!='open' or assignment.get('archive_pending'):
+                raise ValueError('Assignment is closing or closed')
+        members = await self.members(data)
+        await self.compute.validate_workspace(data['id'],members,data['profile'],data['course_ceiling'])
+        return await self.provider.put('workspaces',{**data,'state':'stopped'},actor=actor)
+
+    @audited_lifecycle
+    @course_serialized
     async def start(self, identifier, *, actor):
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
@@ -165,6 +204,7 @@ class WorkspaceService:
             await self.provider.put('workspaces',{**workspace,'state':'running'},actor=actor)
 
     @audited_lifecycle
+    @course_serialized
     async def remove_member(self, identifier, membership_id, *, actor):
         target = await self.get(identifier)
         affected = sorted([w for w in await self.provider.list('workspaces')
@@ -204,6 +244,7 @@ class WorkspaceService:
             await self.provider.put('workspaces',{**workspace,'state':'stopped','archive_pending':archive or workspace.get('archive_pending',False)},actor=actor)
 
     @audited_lifecycle
+    @course_serialized
     async def close_assignment(self, assignment, *, actor):
         await self.provider.put('assignments',{**assignment,'archive_pending':True},actor=actor)
         groups = {g['id'] for g in await self.provider.groups(assignment['course_id'])
@@ -236,19 +277,24 @@ class WorkspaceService:
                                       'archive_pending':False,'archive_evidence':evidence},actor=actor)
 
     @audited_lifecycle
+    @course_serialized
     async def reconcile_snapshot(self, snapshot, *, actor):
         """The same normalized provider sink, with no external provider writes."""
         course = snapshot['course']
         groups = {group['id']: group for group in snapshot['groups']}
+        # Course serialization excludes every controlled create/start while collecting
+        # writers. Persist the barrier before waiting for any workspace lock.
+        configured_course = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
+        if configured_course is None:
+            raise ValueError('Owned course required for reconciliation barrier')
+        await self.provider.put('courses',{**configured_course,'reconciliation_pending':True},actor=actor)
         workspaces = sorted([w for w in await self.provider.list('workspaces')
                              if w.get('course_id') == course['id']],key=lambda w:w['id'])
         async with AsyncExitStack() as stack:
             for workspace in workspaces:
                 await stack.enter_async_context(self.locks.setdefault(workspace['id'],asyncio.Lock()))
-            configured_course = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
-            if configured_course is None:
-                raise ValueError('Owned course required for reconciliation barrier')
-            await self.provider.put('courses',{**configured_course,'reconciliation_pending':True},actor=actor)
+            # Direct Stop may update state while we wait; refresh under all locks.
+            workspaces = [await self.get(w['id']) for w in workspaces]
             # Persist mutation guards across every awaited stop and group update.
             for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'reconciling'},actor=actor)

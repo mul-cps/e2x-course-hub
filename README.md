@@ -512,3 +512,12 @@ before stopping writers and clears it only after every writer stop/release and e
 group/Share update succeeds. Start requires its workspace to be stopped and refuses
 an unresolved course/group lifecycle. Stopping one sibling cannot clear this barrier;
 retry full reconciliation to recover. Generic record CRUD cannot clear the barrier.
+
+Controlled workspace creation, start, membership removal, assignment closure and
+reconciliation serialize at course scope before taking workspace locks. Reconciliation
+persists its barrier before waiting for workspace locks, collects the authoritative
+writer set under course serialization and refreshes states once all locks are held.
+A late create/start waits until reconciliation completes and revalidates the current
+course/assignment records. Run one writable console service process per console;
+multiple writable replicas require equivalent shared lifecycle serialization before
+scaling.

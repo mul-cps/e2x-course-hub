@@ -35,6 +35,12 @@ class RecordsHandler(BaseAPIHandler):
             await self.authorize(old_course,previous.get('term_id'),read=read)
         return actor
 
+    async def check_reconciliation_barrier(self, kind, data):
+        course_id = data.get('id') if kind=='courses' else data.get('course_id')
+        course=next((c for c in await self.settings['course_provider'].courses() if c['id']==course_id),None)
+        if course and course.get('reconciliation_pending'):
+            raise web.HTTPError(409,reason='Course reconciliation is pending')
+
     @web.authenticated
     async def get(self, kind):
         provider=self.settings['course_provider']
@@ -70,6 +76,7 @@ class RecordsHandler(BaseAPIHandler):
         if 'reconciliation_pending' in data:
             raise web.HTTPError(400,reason='Reconciliation barriers are service-controlled')
         actor = await self.authorize_record(kind,data)
+        await self.check_reconciliation_barrier(kind,data)
         if kind=='courses' and {'resource_ceiling','workspace_bindings'} & set(data):await self.authorize()
         if kind in ('assignments','workspaces'):
             raise web.HTTPError(405,reason='Use controlled assignment/workspace lifecycle APIs')
@@ -101,6 +108,7 @@ class RecordsHandler(BaseAPIHandler):
         existing=next((r for r in await self.settings['course_provider'].list(kind) if r['id']==data.get('id')),None)
         if existing is None:raise web.HTTPError(404)
         actor = await self.authorize_record(kind,existing)
+        await self.check_reconciliation_barrier(kind,existing)
         if kind in ('assignments','workspaces','memberships'):
             raise web.HTTPError(405,reason='Membership removal requires controlled workspace stop/revoke')
         if kind == 'groups' and any(w.get('group_id') == data.get('id') for w in await self.settings['course_provider'].list('workspaces')):
