@@ -29,3 +29,13 @@ class BootstrapTest(unittest.TestCase):
             self.assertEqual(app.tornado_settings['console_owner'],'cit')
             self.assertEqual(app.tornado_settings['api'].server.courses,{})
             app.tornado_settings['course_provider'].db.close()
+
+    def test_newer_database_schema_is_not_silently_downgraded(self):
+        import sqlite3
+        from e2x_course_hub.cps.providers import LocalCourseProvider
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'db'
+            with sqlite3.connect(path) as db:db.execute('PRAGMA user_version=99')
+            with self.assertRaisesRegex(ValueError,'newer'):
+                LocalCourseProvider(path,'cps')
+            with sqlite3.connect(path) as db:self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],99)

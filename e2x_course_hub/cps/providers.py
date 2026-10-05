@@ -47,8 +47,12 @@ class LocalCourseProvider:
         self._importing = False
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
+        if self.db.execute('PRAGMA user_version').fetchone()[0]>3:
+            self.db.close()
+            raise ValueError('Console database schema is newer than this application; restore matching versions')
         with self.db:
             self.db.executescript('''
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS records (
                     console TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
                     payload TEXT NOT NULL, PRIMARY KEY(console, kind, id));
