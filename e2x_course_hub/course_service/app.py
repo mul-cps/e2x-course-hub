@@ -12,8 +12,12 @@ from ..api.api import API
 from ..api.course_api import HubAPI
 from ._data import DATA_FILES_PATH
 from ..cps.providers import configure_provider
-from ..cps.oauth import SafeOAuthCallbackHandler
+from ..cps.oauth import CPSHubOAuth, SafeOAuthCallbackHandler
 from ..cps.handlers import default_handlers as cps_handlers
+from ..cps.platform_handlers import default_handlers as platform_handlers
+from ..cps.proxy import default_handlers as proxy_handlers
+from ..cps.compute import ComputePolicyClient
+from ..cps.workspaces import HubWorkspaceAdapter, WorkspaceService
 from .handlers import apihandlers, handlers
 
 
@@ -88,12 +92,17 @@ class CourseServiceApp(Application):
         ),
     ).tag(config=True)
 
+    compute_gateway_url = Unicode("", help="HTTPS public compute gateway for visitor token bridge").tag(config=True)
+    compute_policy_url = Unicode('', help='Private HTTPS shared policy API').tag(config=True)
+    compute_policy_token = Unicode('', help='Private console-specific service token').tag(config=True)
+    oauth_pkce = Bool(False, help="Enable S256 PKCE when qualified against the Hub OAuth endpoint").tag(config=True)
     console_owner = Unicode('cps', help='Console record owner: cps or cit').tag(config=True)
     database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
     course_providers = Dict(default_value={'local': {'enabled': True}, 'moodle': {'enabled': False}}, help='Course provider configuration').tag(config=True)
 
     def init_tornado_settings(self):
-        HubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
+        CPSHubOAuth.instance().pkce_enabled = self.oauth_pkce
+        CPSHubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
         provider = configure_provider(self.course_providers, self.database_path, self.console_owner)
         hub_api = HubAPI(api_token=self.api_token, api_url=self.api_url)
         api = API(
@@ -103,10 +112,19 @@ class CourseServiceApp(Application):
             logger=self.log,
         )
 
+        compute = None
+        workspace_service = None
+        if self.compute_policy_url:
+            compute = ComputePolicyClient(self.compute_policy_url, self.compute_policy_token, self.console_owner)
+            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api))
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))
         settings = {
             "api": api,
             "course_provider": provider,
+            "compute_policy": compute,
+            "compute_gateway_url": self.compute_gateway_url,
+            "console_owner": self.console_owner,
+            "workspace_service": workspace_service,
             "xsrf_cookies": True,
             "cookie_options": {"secure": True, "httponly": True, "samesite": "Lax"},
             "refresh_interval": self.refresh_interval,
@@ -130,7 +148,7 @@ class CourseServiceApp(Application):
                 SafeOAuthCallbackHandler,
             ),
         ]
-        for pattern, handler in apihandlers.default_handlers + cps_handlers + handlers.default_handlers:
+        for pattern, handler in apihandlers.default_handlers + cps_handlers + platform_handlers + proxy_handlers + handlers.default_handlers:
             full_pattern = ujoin(self.service_prefix, pattern.lstrip("/"))
             app_handlers.append((full_pattern, handler))
         self.handlers = app_handlers

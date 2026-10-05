@@ -29,11 +29,12 @@ class ComputePolicyClient:
     async def put_grant(self, grant, *, actor):
         if grant.get('source', self.console) != self.console:
             raise PermissionError('console cannot mutate another console grant')
-        return await self._request('grants', 'PUT', {**grant, 'source': self.console, 'actor': actor})
+        payload = {key: value for key, value in grant.items() if key != 'source'}
+        return await self._request('grants', 'PUT', payload)
 
-    async def acquire(self, workspace, canonical_members, *, actor):
+    async def acquire(self, workspace, canonical_members, *, profile, ceiling, actor):
         return await self._request('reservations/acquire', 'POST', {
-            'workspace': workspace, 'members': canonical_members, 'actor': actor})
+            'workspace': workspace, 'members': canonical_members, 'profile':profile, 'ceiling':ceiling, 'actor': actor})
 
     async def release_after_shutdown(self, workspace, *, confirmed_by_hub, actor):
         # This boolean must come from a trusted Hub adapter poll, never a browser request.
@@ -41,3 +42,7 @@ class ComputePolicyClient:
             raise ValueError('Hub shutdown confirmation required before releasing reservations')
         return await self._request('reservations/release', 'POST', {
             'workspace': workspace, 'shutdown_confirmed': True, 'actor': actor})
+
+    async def validate_workspace(self, workspace, members, profile, ceiling):
+        return await self._request('workspace-policy', 'POST', {'workspace': workspace,
+            'members': members, 'profile': profile, 'ceiling': ceiling})

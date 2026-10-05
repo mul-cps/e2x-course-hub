@@ -1,4 +1,6 @@
 import { Routes, Route, Link } from "react-router-dom";
+import PlatformPage from "./components/PlatformPage";
+import LocalRecordsPage from "./components/LocalRecordsPage";
 import CoursesPage from "./components/CoursesPage";
 import CourseDetailPage from "./components/CourseDetailPage";
 import ProfileDetailsPage from "./components/ProfileDetailsPage";
@@ -12,11 +14,20 @@ function App() {
         </h1>
         <nav className="flex gap-4 mt-3" aria-label="Administration">
           <Link to="/">Courses</Link>
+          <Link to="/local">Local Courses</Link>
+          <Link to="/projects">Projects</Link>
+          <Link to="/compute">Compute</Link>
+          <Link to="/workspaces">Shared Workspaces</Link>
+          <Link to="/assignments">Assignments</Link>
+          <Link to="/audit">Audit</Link>
           <Link to="/integrations">Integrations</Link>
         </nav>
       </header>
       <main className="flex-1 p-8 bg-muted/30">
         <Routes>
+          {(['projects','compute','workspaces','assignments','audit'] as const).map(section =>
+            <Route key={section} path={`/${section}`} element={<PlatformPage section={section} />} />)}
+          <Route path="/local" element={<LocalRecordsPage />} />
           <Route path="/integrations" element={<section>
             <h2 className="text-xl font-semibold">Integrations → Moodle</h2>
             <p>Planned / Not configured</p>

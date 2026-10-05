@@ -1,25 +1,19 @@
 # CPS/CIT console extension
 
-Status: planned / not deployed (Moodle integration).
+Moodle integration: **Status: planned / not deployed**.
 
 Upstream foundation: `db04b6f02a54392f78479303bbed326627fa13c5`.
 RBAC foundation: `4683d1a09051f8aa0d38a2e6ab181b4979b246b2`, pinned in pyproject.toml.
 
-The CPS modules are independent of upstream infrastructure/profile providers.
+## Deployment and storage
+
+The CPS modules are separate from upstream infrastructure/profile providers.
 `CourseServiceApp.console_owner` is `cps` or `cit`. Deploy separate OAuth clients,
 service tokens, SQLite PVCs and console instances. Run one replica per database.
-`database_path` must point to persistent storage; back up using SQLite's backup API
+`database_path` must point to persistent storage. Back up using SQLite's backup API
 (`LocalCourseProvider.backup`) rather than copying a live database. Restore with
 the matching application revision and Hub database; test restoration before promotion.
 The initial SQLite schema is version 1 (`PRAGMA user_version`).
-
-Local authenticated administrator CRUD is at `/api/local/{courses,terms,memberships,groups,groupings}`;
-`/api/local/audit` reads successful mutations. Upstream course-scoped instructor APIs remain
-available. Browser writes require a CSRF token. No browser receives service tokens.
-Source changes and externally managed record edits are rejected by the backend.
-Import existing records explicitly with `migrate_local`, using existing IDs and references;
-never reconcile by name. Export existing Hub memberships before changing authenticator group ownership.
-The import boundary is implemented, but production export/import and identity mapping need operator review.
 
 ```python
 c.CourseServiceApp.console_owner = 'cps'
@@ -29,55 +23,114 @@ c.CourseServiceApp.course_providers = {
     'moodle': {'enabled': False, 'baseUrl': None, 'authSecretRef': None,
                'syncInterval': '10m', 'readOnly': True},
 }
+c.CourseServiceApp.compute_policy_url = 'https://compute.internal.example'
+c.CourseServiceApp.compute_policy_token = '<private console-specific service token>'
+c.CourseServiceApp.compute_gateway_url = 'https://compute.internal.example'
+# Enable only after compatibility qualification against the deployed Hub OAuth endpoint.
+c.CourseServiceApp.oauth_pkce = True
 ```
 
-Disabled Moodle performs no initialization, secret lookup, requests or scheduling.
-Enabling it fails before database/application initialization. No Moodle dependencies,
-credentials, jobs, LTI authentication or setup wizard are installed.
-The planned provider reads Moodle Web Services into normalized course, term,
-membership, group and grouping records. `reconcile` forwards any provider snapshot
-to a source-neutral async sink; production Hub Shares/workspace provisioning still
-requires its implementation and acceptance testing.
+These tokens must come from Kubernetes Secrets, never browser configuration.
+All new administration APIs check current Hub administrator status on every request;
+instructors retain upstream course-scoped member operations. Course metadata and term
+provenance defaults to local when loading old YAML, retaining original course IDs,
+term dictionary keys, profile settings, mounts, and storage paths. Backend membership
+mutations reject externally managed courses/terms. Local memberships used by running
+shared workspaces must go through stop/revoke operations rather than generic deletion.
 
-Official enrolment remains MUonline/CAMPUSonline's authority. Moodle will own teaching
-rosters, roles and assignment groupings. Compute policy owns resource entitlements;
-consoles own research projects and workspace lifecycle. The university enrolment
-bridge is an ICT dependency. Authentik remains login authority through Dex.
+## Local records and explicit migration
+
+Authenticated admin CRUD: `/api/local/{courses,terms,memberships,groups,groupings,projects}`.
+Read-only lists also include workspaces/assignments and `/api/local/audit`.
+The UI provides Local Courses, Projects, Compute, Shared Workspaces, Assignments,
+Audit and Integrations. Administrator requests are subject to CSRF protection.
+Source changes and externally managed record edits are rejected by the backend.
+Source-neutral reconciliation forwards a provider snapshot into an asynchronous sink.
+
+`cps.migration.import_upstream` explicitly exports exact existing Hub group names and
+usernames into SQLite without changing Hub groups, PVCs or workspace paths. Imports
+are atomic on invalid child references. Import after backup, before changing
+authenticator group ownership, never automatically on login. Canonical person aliases
+need an explicit reviewed mapping; assignment memberships require `canonical_person_id`
+before any global GPU reservation. Matching display names never merges identities.
+The production export/import, grant seeding and storage qualification are operator gates.
+
+Assignments support CSV with `person_id,group_id` headers, manual group/member lists,
+and deterministic random allocation with explicit seed. IDs and provenance flow into
+local groups/groupings/memberships. Existing assignment replacement fails closed;
+reallocation requires stop and reviewed mapping. Assignment closure stops associated
+shared writers and prevents restart. Files remain intact and `archive_pending` remains
+true until an operator verifies all other writers are stopped and applies a read-only
+filesystem archive. The application does not pretend it has performed that operation.
+
+## Shared policy and workspace lifecycle
+
+`cps.compute.ComputePolicyClient` uses server-only HTTPS service tokens for console-owned
+grants and global workspace reservations. Central policy supplies enabled profiles and
+validates selected fixed workspace profiles against global effective member entitlements,
+pooled allowance and the course ceiling. Browser resource overrides are rejected.
+Expired/time-bounded grants are evaluated by the shared compute service; the console
+uses its authoritative grants API and records the real administrator around mutations.
+
+Create via `/api/workspaces/create` with explicit existing neutral Hub account/named-server
+identifiers, owned course/group IDs, selected profile and course ceiling. The console
+never derives a user's home from a display name. Neutral account provisioning and NFS
+mount policy remain trusted Hub adapter/deployment configuration.
+
+Workspace startup validates policy, acquires all-member reservations, synchronizes
+only the controlled group, starts the fixed profile and grants native group Shares.
+A startup error triggers a shutdown poll before reservation release. On member removal,
+the adapter stops and confirms the server is absent from running Hub servers, removes
+group membership, revokes/replaces Shares, releases reservations, then updates local
+membership state. The stopped workspace reports kernel interruption and preserved files.
+Restart revalidates current pooled policy. Shutdown timeout retains membership/reservations.
+`/api/workspaces/{id}/{start,stop,remove-member}` provides these controlled operations.
+The gateway independently requires a trusted shutdown observer, never browser evidence.
+
+## Actual visitor API bridge
+
+`/api/compute/v1/...` allows selected public compute routes and forwards only the visitor's
+Hub OAuth token, `X-CPS-Hub`, content type and idempotency key. It never forwards service
+credentials or permits internal administrative routes. Visitor identities remain separate
+when two browsers collaborate in one RTC kernel. Shared-kernel SDK identity remains the
+workspace principal. No browser data is used to identify who executed a notebook cell.
+
+JupyterLab PageConfig `cpsComputeGatewayUrl` must be the same-origin path
+`/services/<console>/api/compute/v1/`. Bootstrap CSRF through the sibling authenticated
+`/api/compute/xsrf` endpoint (`Cache-Control: no-store`) and send its `xsrf_token` as
+`X-XSRFToken` on writes. Notebook JavaScript cannot read the console-path cookie directly.
+
+## OAuth
+
+State validation is retained from pinned JupyterHub 5.5.2. The wrapper rejects external,
+scheme-relative and backslash redirects. Auth/session cookies are Secure, HttpOnly and
+SameSite=Lax. Optional S256 PKCE uses a separate signed, Secure, HttpOnly same-site
+10-minute verifier cookie tied to the OAuth state. The token exchange adds `code_verifier`
+and preserves confidential client authentication. Consumed/expired state is rejected;
+verifier context is isolated per concurrent request. The opt-in avoids silently changing
+existing confidential-client deployments. An HTTP fake authorization/token endpoint test
+covers completed PKCE flow and replay rejection; deployed Hub compatibility remains a gate.
+
+## Planned Moodle boundary
+
+Disabled Moodle causes no initialization, secret lookup, network requests or scheduling.
+Enabling it fails startup. No Moodle credentials, dependencies, jobs, CRDs, LTI login or
+setup wizard are installed. Local course management stays active.
+Official enrolment remains MUonline/CAMPUSonline authority. Moodle will own teaching
+rosters, roles and assignment groupings; compute policy owns resource entitlements;
+consoles own research projects and workspace lifecycle. The university enrolment bridge
+is an ICT dependency. Authentik remains login authority through Dex.
 Read-only Web Services are planned first, optional LTI 1.3 workspace links later;
 grade return and direct CAMPUSonline integration are later work.
-A source handover requires explicit person/course mapping and a reviewed migration.
-Changing configuration or matching names cannot overwrite local memberships.
+Source handover requires explicit person/course mapping and a reviewed migration.
 
 Official guides: [External Services](https://moodledev.io/docs/5.1/apis/subsystems/external)
 and [LTI](https://docs.moodle.org/501/en/mod/lti).
 
-OAuth uses JupyterHub 5.5.2's HubOAuthCallbackHandler and HubOAuthenticated rather than
-an independent callback implementation. State, redirect and PKCE compatibility are
-owned by this pinned dependency. Proxy/TLS callback and login qualification remain
-release gates. Cookies are secure, HttpOnly and SameSite=Lax; CSRF protection is enabled.
+## Release gates
 
-Remaining release gates: course UI CRUD for new normalized records; Projects, Compute,
-Shared Workspaces and Audit UI; central policy grant/reservation integration; real Hub
-Shares/RTC reconciliation; existing identity/storage migration; failed-mutation auditing;
-SQLite restore exercise and end-to-end OAuth tests against both deployed Hubs.
-Do not release this branch as a production console until those gates pass.
-
-The upstream source audit found that HubOAuth 5.5.2 exchanges authorization codes
-with a confidential `client_secret` and does not pass `code_verifier`. This fork does
-not claim PKCE support. The existing Hub service OAuth path must remain a confidential
-client; a PKCE-required provider configuration is an unqualified gate and must not
-be enabled. The callback validates matching signed state using upstream code and the
-CPS wrapper additionally rejects external/scheme-relative/backslash redirects.
-
-For existing records, CourseMetadata and TermConfig now deserialize absent provenance
-as `source=local`, retaining original course IDs and dictionary term keys. The explicit
-`cps.migration.import_upstream` exports exact existing Hub group names and usernames
-into SQLite without changing any Hub group, PVC or workspace path. Import is an
-operator action after backup, not an automatic login or startup mutation. Upstream
-membership mutation methods enforce local-source editability before writes.
-
-`cps.compute.ComputePolicyClient` provides the server-only shared policy boundary:
-HTTPS service-token calls for console-owned grants and global workspace reservation
-acquire/release. Bind service tokens to the console owner in the gateway. Release
-requires a trusted Hub shutdown poll; browser input is never shutdown evidence.
-This client is not yet wired to console routes or a lifecycle controller.
+No production rollout is claimed. Remaining gates: real two-Hub OAuth/PKCE and browser
+RTC tests; neutral-account/NFS provisioning; canonical identity/grant import and login
+persistence; global trusted shutdown-observer bindings; complete mutation audit coverage
+including upstream Hub writes; source-neutral reconciliation against real Hub Shares;
+read-only archive operation and restore exercise; SQLite migration qualification.

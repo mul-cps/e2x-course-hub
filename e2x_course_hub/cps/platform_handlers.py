@@ -1,0 +1,137 @@
+"""Authenticated console operations. Central policy remains the resource authority."""
+import json
+from tornado import web
+from tornado.httpclient import HTTPClientError
+from .handlers import RecordsHandler
+from .assignments import allocate
+
+class ComputeHandler(RecordsHandler):
+    @web.authenticated
+    async def get(self):
+        await self.authorize()
+        client = self.settings.get('compute_policy')
+        if client is None: raise web.HTTPError(503,reason='Shared compute service not configured')
+        person = self.get_argument('person',None)
+        if person: self.write({'grants':await client.grants(person)})
+        else: self.write({'profiles':await client._request('profiles')})
+
+    @web.authenticated
+    async def post(self):
+        actor = await self.authorize()
+        client = self.settings.get('compute_policy')
+        if client is None: raise web.HTTPError(503,reason='Shared compute service not configured')
+        data = json.loads(self.request.body)
+        allowed = {'id','person','profiles','projects','allowance','expires','starts','reason'}
+        if set(data)-allowed: raise web.HTTPError(400,reason='Unknown grant fields')
+        provider = self.settings['course_provider']
+        previous = await client.grants(data.get('person',''))
+        try: result = await client.put_grant(data,actor=actor)
+        except HTTPClientError as error:
+            provider.denial(actor,'compute-grants',str(data.get('id','')),data,'denied')
+            raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
+        with provider.db:
+            provider._audit(actor,'compute-grants',str(data['id']),json.dumps(previous),json.dumps(result))
+        self.write(result or {})
+
+class WorkspaceHandler(RecordsHandler):
+    @web.authenticated
+    async def post(self, identifier, action):
+        actor = await self.authorize()
+        service = self.settings.get('workspace_service')
+        if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
+        data = json.loads(self.request.body or b'{}')
+        allowed = {'membership_id'} if action == 'remove-member' else set()
+        if set(data)-allowed: raise web.HTTPError(400,reason='Resource overrides and lifecycle assertions are not accepted')
+        try:
+            if action == 'start': await service.start(identifier,actor=actor)
+            elif action == 'stop': await service.close(identifier,actor=actor)
+            else: await service.remove_member(identifier,data['membership_id'],actor=actor)
+        except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
+        except PermissionError as error: raise web.HTTPError(403,reason=str(error))
+        except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
+        except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
+        self.write({'workspace':await service.get(identifier)})
+
+class AssignmentHandler(RecordsHandler):
+    @web.authenticated
+    async def post(self):
+        actor = await self.authorize()
+        provider = self.settings['course_provider']
+        data = json.loads(self.request.body)
+        allowed = {'id','course_id','term_id','mode','rows','group_size','seed'}
+        if set(data)-allowed: raise web.HTTPError(400,reason='Unknown assignment fields')
+        try:
+            courses = await provider.list('courses')
+            course = next((c for c in courses if c['id']==data['course_id']),None)
+            if not course or course.get('source') != 'local': raise PermissionError('Local course required')
+            members = [m['person_id'] for m in await provider.members(data['course_id']) if m.get('term_id')==data['term_id']]
+            groups = allocate(members,mode=data['mode'],rows=data.get('rows'),group_size=data.get('group_size'),seed=data.get('seed'))
+            identifier = data['id']
+            existing = await provider.list('assignments')
+            if any(a['id']==identifier for a in existing): raise ValueError('Existing assignment requires reviewed stop/reallocation; create a new assignment ID')
+            records = {'groups':[], 'groupings':[], 'assignments':[], 'memberships':[]}
+            originals = {m['person_id']:m for m in await provider.members(data['course_id']) if m.get('term_id')==data['term_id']}
+            for group,people in groups.items():
+                group_id = f'{identifier}-{group}'
+                records['groups'].append({'id':group_id, 'course_id':data['course_id'],'assignment_id':identifier,'members':people})
+                for person in people:
+                    records['memberships'].append({**originals[person], 'id':f'{group_id}:{person}', 'group_id':group_id, 'assignment_id':identifier})
+            records['groupings'].append({'id':identifier,'course_id':data['course_id'],'group_ids':[r['id'] for r in records['groups']]})
+            records['assignments'].append({**data,'groups':groups,'source':'local'})
+            await provider.migrate_local(records,actor=actor)
+        except (ValueError,KeyError,TypeError) as error: raise web.HTTPError(400,reason=str(error))
+        except PermissionError as error: raise web.HTTPError(403,reason=str(error))
+        self.write({'assignment':identifier,'groups':groups})
+
+default_handlers = [
+    (r'/api/compute',ComputeHandler),
+    (r'/api/assignments/allocate',AssignmentHandler),
+    (r'/api/workspaces/([^/]+)/(start|stop|remove-member)',WorkspaceHandler),
+]
+
+class WorkspaceCreateHandler(RecordsHandler):
+    @web.authenticated
+    async def post(self):
+        actor = await self.authorize()
+        service = self.settings.get('workspace_service')
+        if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
+        data = json.loads(self.request.body)
+        required = {'id','course_id','term_id','group_id','hub_user','hub_server','profile','course_ceiling'}
+        if set(data) != required: raise web.HTTPError(400,reason='Exact workspace fields required; resource overrides forbidden')
+        import re
+        if any(not isinstance(data[k],str) or not re.fullmatch(r'[a-zA-Z0-9_.-]+',data[k]) for k in ('id','group_id','hub_user','hub_server')):
+            raise web.HTTPError(400,reason='Workspace/Hub identifiers must be explicit safe identifiers')
+        provider = self.settings['course_provider']
+        if any(w['id']==data['id'] for w in await provider.list('workspaces')):
+            raise web.HTTPError(409,reason='Workspace already exists')
+        groups = await provider.groups(data['course_id'])
+        if not any(g['id']==data['group_id'] for g in groups): raise web.HTTPError(400,reason='Unknown owned course group')
+        try:
+            members = await service.members(data)
+            await service.compute.validate_workspace(data['id'],members,data['profile'],data['course_ceiling'])
+            await provider.put('workspaces',{**data,'state':'stopped'},actor=actor)
+        except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
+        except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected profile')
+        self.write({'workspace':data['id']})
+
+default_handlers.append((r'/api/workspaces/create',WorkspaceCreateHandler))
+
+class AssignmentCloseHandler(RecordsHandler):
+    @web.authenticated
+    async def post(self, identifier):
+        actor = await self.authorize()
+        service = self.settings.get('workspace_service')
+        if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
+        provider = self.settings['course_provider']
+        assignment = next((a for a in await provider.list('assignments') if a['id']==identifier),None)
+        if not assignment: raise web.HTTPError(404)
+        if assignment.get('source') != 'local': raise web.HTTPError(403,reason='External assignment is read-only')
+        groups = {g['id'] for g in await provider.groups(assignment['course_id']) if g.get('assignment_id')==identifier}
+        for workspace in await provider.list('workspaces'):
+            if workspace.get('group_id') in groups:
+                await service.close(workspace['id'],actor=actor,archive=True)
+        await provider.put('assignments',{**assignment,'state':'closed','archive_pending':True},actor=actor)
+        self.write({'assignment':identifier,'state':'closed','archive_pending':True,
+                    'notice':'Associated shared writers stopped; files retained. Read-only filesystem archive remains an operator gate.'})
+
+default_handlers.append((r'/api/assignments/([^/]+)/close',AssignmentCloseHandler))

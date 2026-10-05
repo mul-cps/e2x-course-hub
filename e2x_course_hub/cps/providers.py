@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Protocol
 
-KINDS = ('courses', 'terms', 'memberships', 'groups', 'groupings')
+KINDS = ('courses', 'terms', 'memberships', 'groups', 'groupings', 'projects', 'assignments', 'workspaces')
 
 class CourseProvider(Protocol):
     async def courses(self): ...
@@ -68,7 +68,7 @@ class LocalCourseProvider:
         record.setdefault('external_id', None)
         if record['external_id'] is not None:
             raise PermissionError('local records cannot claim external identity')
-        if kind != 'courses':
+        if kind in ('terms', 'memberships', 'groups', 'groupings', 'assignments', 'workspaces'):
             course_id = record.get('course_id')
             exists = self.db.execute("SELECT 1 FROM records WHERE console=? AND kind='courses' AND id=?", (self.console, course_id)).fetchone()
             if not exists: raise ValueError('course reference does not exist in this console')
@@ -83,6 +83,9 @@ class LocalCourseProvider:
         previous = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?', (self.console, kind, identifier)).fetchone()
         if not previous: raise KeyError(identifier)
         if json.loads(previous['payload']).get('source') != 'local': raise PermissionError('externally managed record')
+        if kind == 'groups':
+            if any(w.get('group_id') == identifier for w in await self.list('workspaces')):
+                raise ValueError('group still has a workspace reference; controlled lifecycle required')
         if kind == 'courses':
             for child in KINDS[1:]:
                 if await self.list(child, identifier): raise ValueError('course still has referenced records; archive workspaces first')
@@ -92,6 +95,13 @@ class LocalCourseProvider:
 
     def _audit(self, actor, kind, identifier, old, new):
         self.db.execute('INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (actor, self.console, kind, identifier, old, new, datetime.now(timezone.utc).isoformat(), 'success'))
+
+    def denial(self, actor, kind, identifier, requested, outcome):
+        previous = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?', (self.console,kind,identifier)).fetchone()
+        with self.db:
+            self.db.execute('INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (actor,self.console,kind,identifier,previous['payload'] if previous else None,
+                 json.dumps(requested,sort_keys=True),datetime.now(timezone.utc).isoformat(),outcome))
 
     def audit(self):
         return [dict(row) for row in self.db.execute('SELECT * FROM audit WHERE console=? ORDER BY rowid', (self.console,))]

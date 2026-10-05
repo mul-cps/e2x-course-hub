@@ -10,9 +10,12 @@ from ...api.course_api import CourseAPI
 from ...api.errors import APIError, UnauthorizedError
 from ...api.profile_api import ProfileAPI
 from ...schema.user import User
+from ...cps.oauth import CPSHubOAuth, PKCELoginMixin
 
 
-class BaseHandler(HubOAuthenticated, RequestHandler):
+class BaseHandler(PKCELoginMixin, HubOAuthenticated, RequestHandler):
+    hub_auth_class = CPSHubOAuth
+
     def write_error(self, status_code: int, **kwargs):
         """Override to handle APIError exceptions with RFC 9457 format."""
         exc_info = kwargs.get("exc_info")
