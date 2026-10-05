@@ -10,11 +10,12 @@ SHA256 into this directory, then supply both Docker build arguments:
 
 ```sh
 podman build --build-arg COMPUTE_WHEEL=cps_compute-0.1.0-py3-none-any.whl \
-  --build-arg COMPUTE_WHEEL_SHA256=00f81cc1153384b7f3376fd1f7929c63cdd285d0fbb3840e843adfefb660bf9b \
+  --build-arg COMPUTE_WHEEL_SHA256=093238f07ace92d8a31fe24f80eb7b86422d6c14809c6e3ddc2aaa30fa9685dc \
   -t console-qualified .
 ```
 
-The example digest identifies the locally reviewed 2026-10-05 SDK artifact; it is
+The example digest identifies the locally reviewed 2026-10-05 SDK artifact built
+from compute commit `fa48334`; it is
 not a claim of a published release. Future releases must use their reviewed wheel
 and digest, with console/SDK interface compatibility qualification. Wheels are
 ignored; README and verification code are tracked. Never silently replace the
