@@ -67,6 +67,7 @@ class LocalCourseProvider:
             ''')
             if 'canonical_person_id' not in {row[1] for row in self.db.execute('PRAGMA table_info(email_links)')}:
                 self.db.execute('ALTER TABLE email_links ADD COLUMN canonical_person_id TEXT')
+            self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS email_links_canonical ON email_links(console,canonical_person_id)')
 
     async def list(self, kind, course_id=None):
         self._kind(kind)
@@ -173,6 +174,8 @@ class LocalCourseProvider:
             for (hub,username),identity in mapping.items():
                 if hub!=self.console:continue
                 email,person=identity['email'],identity['person_id']
+                collision=self.db.execute('SELECT username FROM email_links WHERE console=? AND canonical_person_id=? AND username<>?',(hub,person,username)).fetchone()
+                if collision:raise ValueError('duplicate canonical person within Hub requires explicit alias migration')
                 previous=self.db.execute('SELECT email,canonical_person_id FROM email_links WHERE console=? AND username=?',(hub,username)).fetchone()
                 if previous:
                     if previous['canonical_person_id'] and previous['canonical_person_id']!=person:

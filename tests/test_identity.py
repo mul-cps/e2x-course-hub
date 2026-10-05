@@ -59,3 +59,18 @@ class IdentityTest(unittest.TestCase):
                 linked=provider.db.execute('SELECT email FROM email_links').fetchone()
                 self.assertEqual(linked['email'],'person@example.edu')
             asyncio.run(run());provider.db.close()
+
+    def test_uuid_collision_across_separate_requests_and_email_handover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider=LocalCourseProvider(Path(tmp)/'db','cps')
+            person='00000000-0000-4000-8000-000000000001'
+            async def run():
+                await provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                with self.assertRaisesRegex(ValueError,'duplicate canonical'):
+                    await provider.link_identities([{'hub':'cps','username':'bob','email':'bob@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                self.assertIsNone(provider.db.execute('SELECT username FROM email_links WHERE username=?',('bob',)).fetchone())
+                await provider.link_identities([{'hub':'cps','username':'alice','email':'new-alice@example.edu','person_id':person,'administrator_reviewed':True}],actor='admin')
+                linked=provider.db.execute('SELECT email,canonical_person_id FROM email_links WHERE username=?',('alice',)).fetchone()
+                self.assertEqual(linked['canonical_person_id'],person)
+                self.assertEqual(linked['email'],'new-alice@example.edu')
+            asyncio.run(run());provider.db.close()
