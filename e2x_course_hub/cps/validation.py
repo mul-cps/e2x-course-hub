@@ -17,6 +17,7 @@ class WorkspaceBinding(BaseModel):
     pod: Optional[str] = None
 
 class Course(Record):
+    reconciliation_pending: bool = False
     name: str = ''
     description: str = ''
     resource_ceiling: Optional[Dict[str,Any]] = None

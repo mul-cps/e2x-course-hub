@@ -163,6 +163,15 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Denied'})).code,403)
         self.assertEqual(self.fetch('/records/courses').code,403)
 
+    def test_reconciliation_barrier_cannot_be_cleared_by_crud(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c','reconciliation_pending':True},actor='service')
+        self.io_loop.run_sync(seed)
+        response=self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','reconciliation_pending':False}))
+        self.assertEqual(response.code,400)
+        self.assertTrue(self.io_loop.run_sync(self.provider.courses)[0]['reconciliation_pending'])
+
     def test_membership_mutations_blocked_while_starting_or_reconciling(self):
         async def seed(state):
             await self.provider.put('courses',{'id':'c'},actor='admin')

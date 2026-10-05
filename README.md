@@ -506,3 +506,9 @@ configure SQLite/config paths inside that console's `/data`. Supply secrets priv
 and only route through existing Hub service endpoints. Run image qualification and
 storage permissions/backup restore checks before deployment; this change does not
 publish an image or deploy services.
+
+Reconciliation persists a service-controlled course `reconciliation_pending` barrier
+before stopping writers and clears it only after every writer stop/release and every
+group/Share update succeeds. Start requires its workspace to be stopped and refuses
+an unresolved course/group lifecycle. Stopping one sibling cannot clear this barrier;
+retry full reconciliation to recover. Generic record CRUD cannot clear the barrier.

@@ -67,6 +67,8 @@ class RecordsHandler(BaseAPIHandler):
     @web.authenticated
     async def post(self, kind):
         data = self.body()
+        if 'reconciliation_pending' in data:
+            raise web.HTTPError(400,reason='Reconciliation barriers are service-controlled')
         actor = await self.authorize_record(kind,data)
         if kind=='courses' and {'resource_ceiling','workspace_bindings'} & set(data):await self.authorize()
         if kind in ('assignments','workspaces'):

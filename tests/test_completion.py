@@ -129,6 +129,37 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls.count('sync'),1)
         self.assertEqual(self.calls.count('shares'),2)
 
+    async def test_partial_reconciliation_blocks_sibling_restart_even_after_direct_stop(self):
+        workspace=await self.service.get('w')
+        await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')
+        course=(await self.provider.courses())[0]
+        binding={**course['workspace_bindings'][0],'hub_server':'rtc2'}
+        await self.provider.put('courses',{**course,'workspace_bindings':course['workspace_bindings']+[binding]},actor='admin')
+        snapshot={'course':course,'groups':[{'id':'g'}],
+                  'members':await self.provider.members('c'),'groupings':[]}
+        original_stop=self.hub.stop_confirmed
+        async def delayed_failure(workspace):
+            await original_stop(workspace)
+            if workspace['id']=='w2':
+                await asyncio.sleep(0)
+                raise TimeoutError('second writer remains active')
+        self.hub.stop_confirmed=delayed_failure
+        with self.assertRaises(TimeoutError):
+            await self.service.reconcile_snapshot(snapshot,actor='reconciler')
+        self.assertTrue((await self.provider.courses())[0]['reconciliation_pending'])
+        self.assertNotIn('sync',self.calls)
+        with self.assertRaises(ValueError):await self.service.start('w',actor='teacher')
+        await self.service.close('w',actor='teacher')
+        self.assertEqual((await self.service.get('w'))['state'],'stopped')
+        with self.assertRaisesRegex(ValueError,'barrier'):
+            await self.service.start('w',actor='teacher')
+        self.assertNotIn('spawn',self.calls)
+        self.hub.stop_confirmed=original_stop
+        await self.service.reconcile_snapshot(snapshot,actor='reconciler')
+        self.assertFalse((await self.provider.courses())[0]['reconciliation_pending'])
+        await self.service.start('w',actor='teacher')
+        self.assertIn('spawn',self.calls)
+
     async def test_empty_assignment_cannot_claim_read_only_archive(self):
         await self.provider.put('assignments',{'id':'empty','course_id':'c','mode':'manual'},actor='admin')
         assignment=next(a for a in await self.provider.list('assignments') if a['id']=='empty')

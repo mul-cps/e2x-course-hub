@@ -119,6 +119,8 @@ class WorkspaceService:
     async def start(self, identifier, *, actor):
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
+            if workspace.get('state','stopped') != 'stopped':
+                raise ValueError('Workspace lifecycle is unresolved; observed Stop/reconciliation required')
             if workspace.get('archive_pending') or workspace.get('archived'):
                 raise ValueError('Archived workspace cannot restart a writer')
             group=next((g for g in await self.provider.groups(workspace['course_id']) if g['id']==workspace['group_id']),{})
@@ -128,6 +130,12 @@ class WorkspaceService:
                 if not assignment or assignment.get('state','open') != 'open' or assignment.get('archive_pending'):
                     raise ValueError('Closed assignment cannot restart a writer')
             course=next((c for c in await self.provider.courses() if c['id']==workspace['course_id']),None)
+            if course and course.get('reconciliation_pending'):
+                raise ValueError('Course reconciliation barrier is unresolved; reconcile every writer before restart')
+            siblings = [w for w in await self.provider.list('workspaces')
+                        if w.get('course_id') == workspace['course_id'] and w.get('group_id') == workspace['group_id']]
+            if any(w.get('state') in ('reconciling','starting') for w in siblings):
+                raise ValueError('Shared group has an unresolved lifecycle')
             if not course or course.get('resource_ceiling') is None:
                 raise ValueError('Administrator-controlled course resource ceiling required')
             bindings = [b for b in course.get('workspace_bindings', [])
@@ -237,6 +245,10 @@ class WorkspaceService:
         async with AsyncExitStack() as stack:
             for workspace in workspaces:
                 await stack.enter_async_context(self.locks.setdefault(workspace['id'],asyncio.Lock()))
+            configured_course = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
+            if configured_course is None:
+                raise ValueError('Owned course required for reconciliation barrier')
+            await self.provider.put('courses',{**configured_course,'reconciliation_pending':True},actor=actor)
             # Persist mutation guards across every awaited stop and group update.
             for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'reconciling'},actor=actor)
@@ -275,3 +287,5 @@ class WorkspaceService:
                     await self.hub.replace_shares(workspace,group_id)
             for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
+            current_course = next(c for c in await self.provider.courses() if c['id']==course['id'])
+            await self.provider.put('courses',{**current_course,'reconciliation_pending':False},actor=actor)
