@@ -521,3 +521,12 @@ A late create/start waits until reconciliation completes and revalidates the cur
 course/assignment records. Run one writable console service process per console;
 multiple writable replicas require equivalent shared lifecycle serialization before
 scaling.
+
+CPS/CIT console images configured with `cps_compute.storage.HTTPFilesystemAdapter`
+require the reviewed compute SDK wheel. Follow [compute-artifacts/README.md](compute-artifacts/README.md):
+provide the exact release wheel basename through `COMPUTE_WHEEL` and its reviewed
+SHA256 through `COMPUTE_WHEEL_SHA256`. The builder verifies bytes/project metadata
+before resolving its dependency wheels; runtime installation uses only the builder
+wheelhouse. Generic console builds omit both arguments and remain SDK-independent.
+The release pipeline must fetch the compatible released artifact and reviewed checksum;
+no PyPI substitution of the SDK is permitted.
