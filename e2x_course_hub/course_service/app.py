@@ -12,6 +12,7 @@ from ..api.api import API
 from ..api.course_api import HubAPI
 from ._data import DATA_FILES_PATH
 from ..cps.providers import configure_provider
+from ..cps.bootstrap import ensure_initial_config
 from ..cps.oauth import CPSHubOAuth, SafeOAuthCallbackHandler
 from ..cps.handlers import default_handlers as cps_handlers
 from ..cps.platform_handlers import default_handlers as platform_handlers
@@ -22,6 +23,9 @@ from .handlers import apihandlers, handlers
 
 
 class CourseServiceApp(Application):
+    config_file = Unicode("",help="Python application configuration file").tag(config=True)
+    aliases = {"config":"CourseServiceApp.config_file"}
+    legacy_rbac_roles = Dict(default_value={"instructor":"instructor"},help="Reviewed legacy role aliases interpreted without renaming Hub groups").tag(config=True)
     data_files_path = Unicode(
         DATA_FILES_PATH,
         help="Path to the data files for the application. Defaults to the package data files.",
@@ -105,6 +109,8 @@ class CourseServiceApp(Application):
         CPSHubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
         provider = configure_provider(self.course_providers, self.database_path, self.console_owner)
         hub_api = HubAPI(api_token=self.api_token, api_url=self.api_url)
+        hub_api.audit_provider = provider
+        ensure_initial_config(self.server_config_file)
         api = API(
             server_config_file=self.server_config_file,
             hub_api=hub_api,
@@ -124,6 +130,7 @@ class CourseServiceApp(Application):
             "compute_policy": compute,
             "compute_gateway_url": self.compute_gateway_url,
             "console_owner": self.console_owner,
+            "legacy_rbac_roles": self.legacy_rbac_roles,
             "workspace_service": workspace_service,
             "xsrf_cookies": True,
             "cookie_options": {"secure": True, "httponly": True, "samesite": "Lax"},
@@ -158,6 +165,8 @@ class CourseServiceApp(Application):
 
     def initialize(self, *args, **kwargs):
         super().initialize(*args, **kwargs)
+        if self.config_file:
+            self.load_config_file(self.config_file)
         self.init_tornado_settings()
         self.init_handlers()
         self.initialize_tornado_application()

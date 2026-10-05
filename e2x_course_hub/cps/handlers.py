@@ -4,29 +4,69 @@ from tornado import web
 from ..course_service.handlers.base import BaseAPIHandler
 
 class RecordsHandler(BaseAPIHandler):
-    async def authorize(self):
+    async def authorize(self, course_id=None, term_id=None, *, read=False):
         user = await self.get_user()
-        # Current Hub state, rather than login-time admin claims, determines authority.
+        self._audit_actor = user.username
+        from .audit import actor_context
+        actor_context.set(user.username)
         current = await self.course_api.hub_api.get_user(user.username)
-        if not current.get('admin', False):
-            if self.request.method in ('POST','DELETE','PUT'):
-                self.settings['course_provider'].denial(user.username,'authorization',self.request.path,{},'denied')
-            raise web.HTTPError(403, reason='Console administrator required')
-        return user.username
+        if current.get('admin', False): return user.username
+        if course_id:
+            from .authorization import checker, Permission
+            check = checker(user.username,current.get('groups',user.groups),self.settings.get('legacy_rbac_roles'))
+            permission = (Permission.VIEW_TERM if term_id else Permission.VIEW_COURSE) if read else Permission.EDIT_TERM if term_id else Permission.EDIT_COURSE
+            if check.has_permission(permission,course_id=course_id,term_id=term_id):return user.username
+        raise web.HTTPError(403, reason='Owned course scope or console administrator required')
+
+    def body(self):
+        try: data = json.loads(self.request.body)
+        except (ValueError,UnicodeDecodeError): raise web.HTTPError(400,reason='Valid JSON object required')
+        if not isinstance(data,dict):raise web.HTTPError(400,reason='JSON object required')
+        return data
+
+    async def authorize_record(self, kind, data, *, read=False):
+        course = data.get('id') if kind=='courses' else data.get('course_id')
+        actor = await self.authorize(course,data.get('term_id'),read=read)
+        previous = next((r for r in await self.settings['course_provider'].list(kind) if r['id']==data.get('id')),None)
+        if previous:
+            old_course=previous['id'] if kind=='courses' else previous.get('course_id')
+            await self.authorize(old_course,previous.get('term_id'),read=read)
+        return actor
 
     @web.authenticated
     async def get(self, kind):
-        await self.authorize()
-        provider = self.settings['course_provider']
-        if kind == 'audit': self.write({'records': provider.audit()})
-        else: self.write({'records': await provider.list(kind)})
+        provider=self.settings['course_provider']
+        if kind=='audit':
+            await self.authorize()
+            self.write({'records':provider.audit()})
+            return
+        course_id=self.get_argument('course_id',None)
+        term_id=self.get_argument('term_id',None)
+        user=await self.get_user()
+        latest=await self.course_api.hub_api.get_user(user.username)
+        records=await provider.list(kind)
+        if course_id:records=[r for r in records if (r['id'] if kind=='courses' else r.get('course_id'))==course_id]
+        if term_id:records=[r for r in records if r.get('term_id')==term_id]
+        if not latest.get('admin',False):
+            from .authorization import checker,Permission
+            check=checker(user.username,latest.get('groups',user.groups),self.settings.get('legacy_rbac_roles'))
+            def visible(record):
+                course=record['id'] if kind=='courses' else record.get('course_id')
+                term=record.get('term_id')
+                if not course:return False
+                permission=Permission.VIEW_TERM if term else Permission.VIEW_COURSE
+                return check.has_permission(permission,course_id=course,term_id=term)
+            records=[r for r in records if visible(r)]
+            if not check.get_course_ids():raise web.HTTPError(403,reason='Owned course scope required')
+        self.write({'records':records})
 
     @web.authenticated
     async def post(self, kind):
-        actor = await self.authorize()
+        data = self.body()
+        actor = await self.authorize_record(kind,data)
+        if kind=='courses' and {'resource_ceiling','workspace_bindings'} & set(data):await self.authorize()
         if kind in ('assignments','workspaces'):
             raise web.HTTPError(405,reason='Use controlled assignment/workspace lifecycle APIs')
-        data = json.loads(self.request.body)
         if kind == 'groups' and any(w.get('group_id') == data.get('id') for w in await self.settings['course_provider'].list('workspaces')):
             raise web.HTTPError(409,reason='Referenced workspace group requires controlled lifecycle update')
         if kind == 'memberships':
@@ -51,10 +91,12 @@ class RecordsHandler(BaseAPIHandler):
 
     @web.authenticated
     async def delete(self, kind):
-        actor = await self.authorize()
+        data = self.body()
+        existing=next((r for r in await self.settings['course_provider'].list(kind) if r['id']==data.get('id')),None)
+        if existing is None:raise web.HTTPError(404)
+        actor = await self.authorize_record(kind,existing)
         if kind in ('assignments','workspaces','memberships'):
             raise web.HTTPError(405,reason='Membership removal requires controlled workspace stop/revoke')
-        data = json.loads(self.request.body)
         if kind == 'groups' and any(w.get('group_id') == data.get('id') for w in await self.settings['course_provider'].list('workspaces')):
             raise web.HTTPError(409,reason='Referenced workspace group cannot be deleted')
         try:

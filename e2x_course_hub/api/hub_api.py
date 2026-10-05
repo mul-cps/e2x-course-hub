@@ -49,13 +49,42 @@ class HubAPI(HubOAuth):
         req = HTTPRequest(
             url, method=method, headers=self.auth_header, body=body, allow_nonstandard_methods=True
         )
+        provider = getattr(self, 'audit_provider', None)
+        mutation = method in ('POST','PUT','PATCH','DELETE')
+        snapshot_url = url
+        if '/groups/' in url and url.endswith('/users'): snapshot_url = url.rsplit('/users',1)[0]
+        if '/users/' in url and '/servers/' in url: snapshot_url = url.split('/servers/',1)[0]
+        async def snapshot():
+            try:
+                response = await self.client.fetch(HTTPRequest(snapshot_url,headers=self.auth_header))
+                return json.loads(response.body) if response.body else None
+            except HTTPClientError as error:
+                return None if error.code == 404 else {'unavailable':error.code}
+        previous = await snapshot() if provider and mutation else None
+        outcome = 'failure'
+        result = None
         try:
-            return await self.client.fetch(req)
+            result = await self.client.fetch(req)
+            outcome = 'success'
+            return result
         except HTTPClientError as e:
-            # Let specific methods handle 404s, re-raise others as HubAPIError
-            if e.code == 404:
-                raise  # Let caller handle 404s specifically
+            outcome = 'denied' if e.code in (401,403) else 'failure'
+            if e.code == 404: raise
             raise HubAPIError(f"Hub API request failed: {e.message}") from e
+        finally:
+            if provider and mutation:
+                from ..cps.audit import actor_context
+                from datetime import datetime, timezone
+                from urllib.parse import urlsplit
+                current = await snapshot()
+                try: requested = json.loads(body or '{}')
+                except ValueError: requested = {'invalid_json':True}
+                with provider.db:
+                    provider.db.execute('INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, ?)',(
+                        actor_context.get() or 'service:'+provider.console,provider.console,'hub:'+method,
+                        urlsplit(url).path,json.dumps(previous,sort_keys=True),
+                        json.dumps({'observed':current,'requested':requested},sort_keys=True),
+                        datetime.now(timezone.utc).isoformat(),outcome))
 
     def _handle_not_found(self, error: HTTPClientError, resource_type: str, resource_name: str):
         """Convert 404 errors to specific exceptions.

@@ -134,3 +134,57 @@ RTC tests; neutral-account/NFS provisioning; canonical identity/grant import and
 persistence; global trusted shutdown-observer bindings; complete mutation audit coverage
 including upstream Hub writes; source-neutral reconciliation against real Hub Shares;
 read-only archive operation and restore exercise; SQLite migration qualification.
+
+## V1 implementation additions
+
+Course and term operations now use `e2x_hub_rbac`'s pinned `Scope`, `RoleAssignment`
+and `PermissionChecker`. Course owners and term instructors can manage their scoped
+records, allocate assignments and operate existing shared workspaces without a global
+administrator role. List APIs filter records by fresh scoped role assignments. Compute
+grants, canonical identity links, audit overview, course resource ceilings and approved
+neutral-account bindings remain global administrator operations. TA access is read-only.
+Old group names are retained; `legacy_rbac_roles` explicitly interprets reviewed aliases
+(default: `instructor`), without renaming groups or silently broadening privileges.
+
+Workspace creation requires a course record's administrator-managed `resource_ceiling`
+and exact `workspace_bindings` entry (`group_id`, `hub_user`, `hub_server`). Resource
+ceilings are refreshed from the owned course before every startup and revalidated by
+shared policy. An instructor cannot select an unrelated Hub user, arbitrary administrative
+Hub group or resource override through the workspace API.
+
+Normalized record validation rejects unknown fields and wrong types, checks owned course,
+term, group and grouping references, and prevents silent course/term reassociation of
+existing IDs. Group deletion preserves membership/workspace/grouping references.
+
+Identity authority is explicitly verified or administrator-reviewed **normalized email**.
+`reviewed_email_mapping` takes explicit existing `(hub, username, email)` rows and proof
+flags, rejects missing/unreviewed/duplicate mappings, and never infers email from a username.
+Different CPS/CIT usernames may link to the same reviewed email. `POST /api/identities`
+is administrator-only and persists owned links. Membership canonical email values must
+match those stored links. Existing username/path identifiers remain unchanged.
+`import_upstream(..., reviewed_identity_rows=...)` fails on missing user mappings; an
+import without this argument preserves records but intentionally supplies no canonical
+identity and cannot reserve GPU workspaces until mappings are explicitly reviewed.
+No production identity mapping has been generated or installed.
+
+Schema version 2 adds reviewed email links while preserving all version-1 record keys.
+Request-level audit covers every console/upstream API mutation outcome, including invalid
+JSON, denied authorization, DELETE, assignment and lifecycle failures. Provider mutations
+are audited on success/failure; Hub API writes capture actual request actor and observed
+before/after values. Missing Hub observations are explicit `unavailable`, never fabricated.
+No API token is stored in audit entries. Restore and verify the matching application and
+schema version; production restore remains an acceptance gate.
+
+On an empty persistent volume, startup exclusively creates an empty local foundation:
+no roles, profiles, courses or mounts. Existing files are never overwritten. The tested
+command `python -m e2x_course_hub.course_service.app --config=/config/config.py` loads the
+Python configuration through the explicit `config` alias. Seed reviewed profiles/course
+configuration separately; empty defaults intentionally grant no compute permission.
+
+The console service needs scoped Hub permissions for its API reads, controlled group
+management, neutral-account server lifecycle and native Shares. Start with per-neutral-user
+and per-controlled-group filters for `read:users`, `read:groups`, `groups`, `servers`,
+`read:shares` and `shares`; add `admin:users` only for explicitly approved account
+provisioning (disabled by default). Service OAuth access scopes and visitors are separate
+from this server-side token. Qualify the exact Hub scope names/filters against the pinned
+Hub before deployment; never give the browser these service credentials.

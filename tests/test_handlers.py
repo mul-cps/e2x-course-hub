@@ -16,9 +16,11 @@ class HandlersTest(AsyncHTTPTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.provider = LocalCourseProvider(Path(self.tmp.name)/'db','cps')
         self.admin = True
+        self.groups = []
+        self.hub_failure = False
         outer = self
         class Hub:
-            async def get_user(self,name): return {'admin':outer.admin}
+            async def get_user(self,name): return {'admin':outer.admin,'groups':outer.groups}
         class Auth:
             def get_token(self,handler): return handler.request.headers.get('X-Visitor')
         class Proxy(ComputeVisitorProxy):
@@ -27,7 +29,26 @@ class HandlersTest(AsyncHTTPTestCase):
         class Records(RecordsHandler):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
-        return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records)],
+        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler
+        class Assignment(AssignmentHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class Workspace(WorkspaceHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class Compute(ComputeHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class Service:
+            async def get(self,identifier):
+                return next(r for r in await outer.provider.list('workspaces') if r['id']==identifier)
+            async def start(self,identifier,**kwargs):
+                if outer.hub_failure:raise RuntimeError('Hub unavailable')
+                record=await self.get(identifier)
+                await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
+        return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
+            (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
+            (r'/compute',Compute)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
 
@@ -58,6 +79,7 @@ class HandlersTest(AsyncHTTPTestCase):
     def test_referenced_group_cannot_be_changed_or_deleted(self):
         async def seed():
             await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('assignments',{'id':'a','course_id':'c','mode':'manual'},actor='admin')
             await self.provider.put('groups',{'id':'g','course_id':'c','assignment_id':'a'},actor='admin')
             await self.provider.put('workspaces',{'id':'w','course_id':'c','group_id':'g','state':'running'},actor='admin')
         self.io_loop.run_sync(seed)
@@ -70,14 +92,75 @@ class HandlersTest(AsyncHTTPTestCase):
         async def seed():
             await self.provider.put('courses',{'id':'a'},actor='admin')
             await self.provider.put('courses',{'id':'b'},actor='admin')
-            await self.provider.put('memberships',{'id':'m','course_id':'a','group_id':'ga','person_id':'alice','canonical_person_id':'p1'},actor='admin')
+            await self.provider.put('groups',{'id':'ga','course_id':'a'},actor='admin')
+            await self.provider.link_identities([{'hub':'cps','username':'alice','email':'alice@example.edu','administrator_reviewed':True}],actor='admin')
+            await self.provider.put('memberships',{'id':'m','course_id':'a','group_id':'ga','person_id':'alice','canonical_person_id':'alice@example.edu'},actor='admin')
             await self.provider.put('workspaces',{'id':'w','course_id':'a','group_id':'ga','state':'running'},actor='admin')
         self.io_loop.run_sync(seed)
-        response=self.fetch('/records/memberships',method='POST',body=json.dumps({'id':'m','course_id':'b','group_id':'gb','person_id':'bob','canonical_person_id':'p2'}))
+        response=self.fetch('/records/memberships',method='POST',body=json.dumps({'id':'m','course_id':'b','group_id':'gb','person_id':'bob','canonical_person_id':'bob@example.edu'}))
         self.assertEqual(response.code,409)
         records=self.io_loop.run_sync(lambda:self.provider.list('memberships'))
         self.assertEqual(records[0]['person_id'],'alice')
         self.assertEqual(records[0]['course_id'],'a')
+
+    def test_instructor_course_term_crud_assignment_and_workspace_scope(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('terms',{'id':'term-old','course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('terms',{'id':'other-term','course_id':'c','term_id':'other'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('memberships',{'id':'m','course_id':'c','term_id':'t','person_id':'student'},actor='admin')
+            await self.provider.put('workspaces',{'id':'w','course_id':'c','term_id':'t','group_id':'g'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.admin=False
+        self.groups=['lms.course.c.term.t.instructor']
+        response=self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Updated'}))
+        self.assertEqual(response.code,200)
+        visible=self.fetch('/records/workspaces')
+        self.assertEqual([r['id'] for r in json.loads(visible.body)['records']],['w'])
+        self.assertEqual(self.fetch('/records/audit?course_id=c').code,403)
+        response=self.fetch('/records/terms',method='POST',body=json.dumps({'id':'other-term','course_id':'c','term_id':'other'}))
+        self.assertEqual(response.code,403)
+        response=self.fetch('/assignment',method='POST',body=json.dumps({'id':'a','course_id':'c','term_id':'t','mode':'random','group_size':2,'seed':'42'}))
+        self.assertEqual(response.code,200)
+        response=self.fetch('/workspace/w/start',method='POST',body='{}')
+        self.assertEqual(response.code,200)
+        self.assertEqual(self.fetch('/compute',method='POST',body='{}').code,403)
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','resource_ceiling':{'cpu':'100'}})).code,403)
+        self.groups=['lms.course.another.term.t.instructor']
+        self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,403)
+
+    def test_every_http_mutation_audits_invalid_json_delete_denial_and_hub_failure(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'c'},actor='admin')
+            await self.provider.put('workspaces',{'id':'w','course_id':'c','group_id':'g'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.assertEqual(self.fetch('/records/courses',method='POST',body='{invalid').code,400)
+        self.assertEqual(self.fetch('/records/courses',method='DELETE',body=json.dumps({'id':'c'}),allow_nonstandard_methods=True).code,400)
+        self.hub_failure=True
+        self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,500)
+        self.admin=False
+        self.assertEqual(self.fetch('/records/groups',method='POST',body=json.dumps({'id':'bad','course_id':'c'})).code,403)
+        entries=[r for r in self.provider.audit() if r['kind'].startswith('http:')]
+        self.assertEqual(len(entries),4)
+        self.assertEqual([r['outcome'] for r in entries],['invalid','invalid','failure','denied'])
+        self.assertTrue(all(r['actor']=='admin' and r['time'] and r['previous'] is not None and r['current'] is not None for r in entries))
+
+    def test_closed_record_shapes_and_cross_course_references_rejected(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'a'},actor='admin')
+            await self.provider.put('courses',{'id':'b'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'a'},actor='admin')
+        self.io_loop.run_sync(seed)
+        for kind,data in [('memberships',{'id':'m','course_id':'b','person_id':'x','group_id':'g'}),
+                          ('groups',{'id':'evil','course_id':'a','kubernetes_scopes':['admin']}),
+                          ('groupings',{'id':'gg','course_id':'b','group_ids':['g']}),
+                          ('memberships',{'id':'m','course_id':'a','person_id':'x','canonical_person_id':'unreviewed@example.edu'})]:
+            self.assertEqual(self.fetch('/records/'+kind,method='POST',body=json.dumps(data)).code,400)
+        entries=[r for r in self.provider.audit() if r['kind'].startswith('http:')]
+        self.assertEqual(len(entries),4)
+        self.assertTrue(all(r['outcome']=='invalid' for r in entries))
 
     def test_latest_admin_state_authoritative_not_stale_login(self):
         self.admin=False

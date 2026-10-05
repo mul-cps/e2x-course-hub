@@ -75,6 +75,10 @@ class WorkspaceService:
             workspace = await self.get(identifier)
             if workspace.get('archive_pending') or workspace.get('archived'):
                 raise ValueError('Archived workspace cannot restart a writer')
+            course=next((c for c in await self.provider.courses() if c['id']==workspace['course_id']),None)
+            if not course or course.get('resource_ceiling') is None:
+                raise ValueError('Administrator-controlled course resource ceiling required')
+            workspace={**workspace,'course_ceiling':course['resource_ceiling']}
             members = await self.members(workspace)
             await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
             await self.compute.acquire(identifier,members,profile=workspace['profile'],ceiling=workspace['course_ceiling'],actor=actor)

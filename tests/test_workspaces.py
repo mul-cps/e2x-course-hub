@@ -39,8 +39,10 @@ class WorkspaceTests(unittest.TestCase):
             hub=Hub();hub.hub=hub
             service=WorkspaceService(p,Compute(),hub)
             async def run():
-                await p.put('courses',{'id':'c'},actor='admin')
-                await p.put('memberships',{'id':'m','course_id':'c','group_id':'g','person_id':'old-name','canonical_person_id':'p1'},actor='admin')
+                await p.put('courses',{'id':'c','resource_ceiling':{}},actor='admin')
+                await p.put('groups',{'id':'g','course_id':'c'},actor='admin')
+                await p.link_identities([{'hub':'cps','username':'old-name','email':'person1@example.edu','administrator_reviewed':True}],actor='admin')
+                await p.put('memberships',{'id':'m','course_id':'c','group_id':'g','person_id':'old-name','canonical_person_id':'person1@example.edu'},actor='admin')
                 await p.put('workspaces',{'id':'w','course_id':'c','group_id':'g','profile':'shared-5','course_ceiling':{}},actor='admin')
                 if stop_failure:
                     with self.assertRaises(TimeoutError):await service.remove_member('w','m',actor='admin')

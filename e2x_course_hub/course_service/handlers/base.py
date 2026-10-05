@@ -11,6 +11,7 @@ from ...api.errors import APIError, UnauthorizedError
 from ...api.profile_api import ProfileAPI
 from ...schema.user import User
 from ...cps.oauth import CPSHubOAuth, PKCELoginMixin
+from ...cps.audit import AuditMixin, actor_context
 
 
 class BaseHandler(PKCELoginMixin, HubOAuthenticated, RequestHandler):
@@ -44,7 +45,7 @@ class BaseHandler(PKCELoginMixin, HubOAuthenticated, RequestHandler):
         super().write_error(status_code, **kwargs)
 
 
-class BaseAPIHandler(BaseHandler):
+class BaseAPIHandler(AuditMixin, BaseHandler):
     @property
     def course_api(self) -> CourseAPI:
         return self.settings["api"].course_api
@@ -84,6 +85,8 @@ class BaseAPIHandler(BaseHandler):
         # The group memberships might not be updated if they change in JupyterHub
         # after the user has logged in
         updated_user = await self.course_api.hub_api.get_user(hub_user["name"])
+        self._audit_actor = hub_user["name"]
+        actor_context.set(hub_user["name"])
         return User(
             username=hub_user["name"],
             admin=updated_user.get("admin", False),

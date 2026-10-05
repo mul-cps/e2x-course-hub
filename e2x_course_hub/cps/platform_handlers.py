@@ -20,7 +20,7 @@ class ComputeHandler(RecordsHandler):
         actor = await self.authorize()
         client = self.settings.get('compute_policy')
         if client is None: raise web.HTTPError(503,reason='Shared compute service not configured')
-        data = json.loads(self.request.body)
+        data = self.body()
         allowed = {'id','person','profiles','projects','allowance','expires','starts','reason'}
         if set(data)-allowed: raise web.HTTPError(400,reason='Unknown grant fields')
         provider = self.settings['course_provider']
@@ -36,10 +36,11 @@ class ComputeHandler(RecordsHandler):
 class WorkspaceHandler(RecordsHandler):
     @web.authenticated
     async def post(self, identifier, action):
-        actor = await self.authorize()
         service = self.settings.get('workspace_service')
         if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
-        data = json.loads(self.request.body or b'{}')
+        workspace=await service.get(identifier)
+        actor=await self.authorize(workspace['course_id'],workspace.get('term_id'))
+        data=self.body() if self.request.body else {}
         allowed = {'membership_id'} if action == 'remove-member' else set()
         if set(data)-allowed: raise web.HTTPError(400,reason='Resource overrides and lifecycle assertions are not accepted')
         try:
@@ -55,9 +56,9 @@ class WorkspaceHandler(RecordsHandler):
 class AssignmentHandler(RecordsHandler):
     @web.authenticated
     async def post(self):
-        actor = await self.authorize()
         provider = self.settings['course_provider']
-        data = json.loads(self.request.body)
+        data = self.body()
+        actor = await self.authorize(data.get("course_id"),data.get("term_id"))
         allowed = {'id','course_id','term_id','mode','rows','group_size','seed'}
         if set(data)-allowed: raise web.HTTPError(400,reason='Unknown assignment fields')
         try:
@@ -73,10 +74,10 @@ class AssignmentHandler(RecordsHandler):
             originals = {m['person_id']:m for m in await provider.members(data['course_id']) if m.get('term_id')==data['term_id']}
             for group,people in groups.items():
                 group_id = f'{identifier}-{group}'
-                records['groups'].append({'id':group_id, 'course_id':data['course_id'],'assignment_id':identifier,'members':people})
+                records['groups'].append({'id':group_id, 'course_id':data['course_id'],'term_id':data['term_id'],'assignment_id':identifier,'members':people})
                 for person in people:
                     records['memberships'].append({**originals[person], 'id':f'{group_id}:{person}', 'group_id':group_id, 'assignment_id':identifier})
-            records['groupings'].append({'id':identifier,'course_id':data['course_id'],'group_ids':[r['id'] for r in records['groups']]})
+            records['groupings'].append({'id':identifier,'course_id':data['course_id'],'term_id':data['term_id'],'group_ids':[r['id'] for r in records['groups']]})
             records['assignments'].append({**data,'groups':groups,'source':'local'})
             await provider.migrate_local(records,actor=actor)
         except (ValueError,KeyError,TypeError) as error: raise web.HTTPError(400,reason=str(error))
@@ -92,10 +93,10 @@ default_handlers = [
 class WorkspaceCreateHandler(RecordsHandler):
     @web.authenticated
     async def post(self):
-        actor = await self.authorize()
         service = self.settings.get('workspace_service')
         if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
-        data = json.loads(self.request.body)
+        data = self.body()
+        actor=await self.authorize(data.get("course_id"),data.get("term_id"))
         required = {'id','course_id','term_id','group_id','hub_user','hub_server','profile','course_ceiling'}
         if set(data) != required: raise web.HTTPError(400,reason='Exact workspace fields required; resource overrides forbidden')
         import re
@@ -104,6 +105,10 @@ class WorkspaceCreateHandler(RecordsHandler):
         provider = self.settings['course_provider']
         if any(w['id']==data['id'] for w in await provider.list('workspaces')):
             raise web.HTTPError(409,reason='Workspace already exists')
+        course=next((c for c in await provider.courses() if c['id']==data['course_id']),None)
+        binding={key:data[key] for key in ('group_id','hub_user','hub_server')}
+        if not course or course.get('resource_ceiling') != data['course_ceiling'] or binding not in course.get('workspace_bindings',[]):
+            raise web.HTTPError(403,reason='Use administrator-controlled course ceiling and neutral-account binding')
         groups = await provider.groups(data['course_id'])
         if not any(g['id']==data['group_id'] for g in groups): raise web.HTTPError(400,reason='Unknown owned course group')
         try:
@@ -119,12 +124,12 @@ default_handlers.append((r'/api/workspaces/create',WorkspaceCreateHandler))
 class AssignmentCloseHandler(RecordsHandler):
     @web.authenticated
     async def post(self, identifier):
-        actor = await self.authorize()
         service = self.settings.get('workspace_service')
         if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
         provider = self.settings['course_provider']
         assignment = next((a for a in await provider.list('assignments') if a['id']==identifier),None)
         if not assignment: raise web.HTTPError(404)
+        actor=await self.authorize(assignment['course_id'],assignment.get('term_id'))
         if assignment.get('source') != 'local': raise web.HTTPError(403,reason='External assignment is read-only')
         groups = {g['id'] for g in await provider.groups(assignment['course_id']) if g.get('assignment_id')==identifier}
         for workspace in await provider.list('workspaces'):
@@ -135,3 +140,17 @@ class AssignmentCloseHandler(RecordsHandler):
                     'notice':'Associated shared writers stopped; files retained. Read-only filesystem archive remains an operator gate.'})
 
 default_handlers.append((r'/api/assignments/([^/]+)/close',AssignmentCloseHandler))
+
+class IdentityMappingHandler(RecordsHandler):
+    @web.authenticated
+    async def post(self):
+        actor=await self.authorize()
+        data=self.body()
+        if set(data)!={'mappings'} or not isinstance(data['mappings'],list):raise web.HTTPError(400,reason='Explicit reviewed mappings list required')
+        if any(not isinstance(row,dict) for row in data['mappings']):raise web.HTTPError(400,reason='Mapping rows must be objects')
+        if any(row.get('hub')!=self.settings['console_owner'] for row in data['mappings']):raise web.HTTPError(403,reason='Console can link only its own Hub accounts')
+        try:result=await self.settings['course_provider'].link_identities(data['mappings'],actor=actor)
+        except (ValueError,TypeError) as error:raise web.HTTPError(400,reason=str(error))
+        self.write({'linked':result})
+
+default_handlers.append((r'/api/identities',IdentityMappingHandler))

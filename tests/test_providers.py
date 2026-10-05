@@ -68,7 +68,7 @@ class ImportAtomicityTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     await provider.migrate_local({'courses': [{'id':'c'}], 'memberships':[{'id':'m','course_id':'missing'}]}, actor='migration')
                 self.assertEqual(await provider.courses(), [])
-                self.assertEqual(provider.audit(), [])
+                self.assertEqual(provider.audit()[0]["outcome"], "failure")
             asyncio.run(run())
             provider.db.close()
 
