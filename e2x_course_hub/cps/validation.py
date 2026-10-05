@@ -33,6 +33,8 @@ class Membership(Child):
     role: str = 'student'
     group_id: Optional[str] = None
     assignment_id: Optional[str] = None
+    starts: Optional[str] = None
+    expires: Optional[str] = None
 
 class Group(Child):
     name: str = ''
@@ -75,6 +77,10 @@ MODELS = dict(courses=Course,terms=Term,memberships=Membership,groups=Group,grou
 async def validate(provider,kind,record):
     # Preserve absent legacy fields, while rejecting unknown or wrong-type supplied values.
     result=MODELS[kind].model_validate(record).model_dump(exclude_unset=True)
+    if kind=='memberships':
+        from .expiry import instant
+        start,end=instant(result.get('starts')),instant(result.get('expires'))
+        if start and end and start>=end:raise ValueError('membership expiry must follow start')
     course_id=result.get('course_id')
     if course_id is not None:
         courses=await provider.list('courses')

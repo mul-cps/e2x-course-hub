@@ -85,12 +85,16 @@ class BaseAPIHandler(AuditMixin, BaseHandler):
         # The group memberships might not be updated if they change in JupyterHub
         # after the user has logged in
         updated_user = await self.course_api.hub_api.get_user(hub_user["name"])
+        groups=updated_user.get("groups",[])
+        if self.settings.get("course_provider"):
+            from ...cps.expiry import effective_groups
+            groups=effective_groups(self.settings["course_provider"],hub_user["name"],groups)
         self._audit_actor = hub_user["name"]
         actor_context.set(hub_user["name"])
         return User(
             username=hub_user["name"],
             admin=updated_user.get("admin", False),
-            groups=updated_user.get("groups", []),
+            groups=groups,
         )
 
 

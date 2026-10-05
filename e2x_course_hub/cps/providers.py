@@ -80,6 +80,8 @@ class LocalCourseProvider:
             raise ValueError('id and actor are required')
         previous = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?', (self.console, kind, identifier)).fetchone()
         old = json.loads(previous['payload']) if previous else None
+        # CRUD updates preserve unspecified metadata, provenance, policy and references.
+        if old:record={**old,**record}
         if old and kind not in ('courses','projects'):
             if any(old.get(key) != record.get(key) for key in ('course_id','term_id')):
                 raise ValueError('record course/term association is immutable; reviewed migration required')

@@ -105,7 +105,7 @@ class HandlersTest(AsyncHTTPTestCase):
 
     def test_instructor_course_term_crud_assignment_and_workspace_scope(self):
         async def seed():
-            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('courses',{'id':'c','resource_ceiling':{'cpu':'2','memory':'4Gi','gpuMemoryGiB':5},'workspace_bindings':[{'group_id':'g','hub_user':'neutral','hub_server':'shared'}]},actor='admin')
             await self.provider.put('terms',{'id':'term-old','course_id':'c','term_id':'t'},actor='admin')
             await self.provider.put('terms',{'id':'other-term','course_id':'c','term_id':'other'},actor='admin')
             await self.provider.put('groups',{'id':'g','course_id':'c','term_id':'t'},actor='admin')
@@ -116,6 +116,9 @@ class HandlersTest(AsyncHTTPTestCase):
         self.groups=['lms.course.c.term.t.instructor']
         response=self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Updated'}))
         self.assertEqual(response.code,200)
+        course=self.io_loop.run_sync(lambda:self.provider.courses())[0]
+        self.assertEqual(course['resource_ceiling'],{'cpu':'2','memory':'4Gi','gpuMemoryGiB':5})
+        self.assertEqual(course['workspace_bindings'],[{'group_id':'g','hub_user':'neutral','hub_server':'shared'}])
         visible=self.fetch('/records/workspaces')
         self.assertEqual([r['id'] for r in json.loads(visible.body)['records']],['w'])
         self.assertEqual(self.fetch('/records/audit?course_id=c').code,403)
@@ -146,6 +149,19 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(len(entries),4)
         self.assertEqual([r['outcome'] for r in entries],['invalid','invalid','failure','denied'])
         self.assertTrue(all(r['actor']=='admin' and r['time'] and r['previous'] is not None and r['current'] is not None for r in entries))
+
+    def test_expired_teaching_membership_surviving_login_is_no_longer_effective(self):
+        group='lms.course.c.term.t.instructor'
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('terms',{'id':'term','course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('groups',{'id':group,'course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('memberships',{'id':'grant','course_id':'c','term_id':'t','person_id':'admin','group_id':group,'role':'instructor','expires':'2020-01-01T00:00:00Z'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.admin=False
+        self.groups=[group]
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Denied'})).code,403)
+        self.assertEqual(self.fetch('/records/courses').code,403)
 
     def test_closed_record_shapes_and_cross_course_references_rejected(self):
         async def seed():

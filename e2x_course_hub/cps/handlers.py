@@ -11,9 +11,11 @@ class RecordsHandler(BaseAPIHandler):
         actor_context.set(user.username)
         current = await self.course_api.hub_api.get_user(user.username)
         if current.get('admin', False): return user.username
+        from .expiry import effective_groups
+        groups=effective_groups(self.settings["course_provider"],user.username,current.get("groups",user.groups))
         if course_id:
             from .authorization import checker, Permission
-            check = checker(user.username,current.get('groups',user.groups),self.settings.get('legacy_rbac_roles'))
+            check = checker(user.username,groups,self.settings.get('legacy_rbac_roles'))
             permission = (Permission.VIEW_TERM if term_id else Permission.VIEW_COURSE) if read else Permission.EDIT_TERM if term_id else Permission.EDIT_COURSE
             if check.has_permission(permission,course_id=course_id,term_id=term_id):return user.username
         raise web.HTTPError(403, reason='Owned course scope or console administrator required')
@@ -49,7 +51,9 @@ class RecordsHandler(BaseAPIHandler):
         if term_id:records=[r for r in records if r.get('term_id')==term_id]
         if not latest.get('admin',False):
             from .authorization import checker,Permission
-            check=checker(user.username,latest.get('groups',user.groups),self.settings.get('legacy_rbac_roles'))
+            from .expiry import effective_groups
+            groups=effective_groups(provider,user.username,latest.get('groups',user.groups))
+            check=checker(user.username,groups,self.settings.get('legacy_rbac_roles'))
             def visible(record):
                 course=record['id'] if kind=='courses' else record.get('course_id')
                 term=record.get('term_id')
