@@ -36,6 +36,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
                 outer.calls.append('stop:'+workspace['id'])
                 if outer.stop_failure:raise TimeoutError('Hub active')
             async def start(self,*args):
+                assert (await outer.service.get('w'))['state']=='starting'
                 outer.calls.append('spawn')
                 if outer.spawn_failure:raise RuntimeError('lost response')
             async def sync_group(self,workspace,members):outer.calls.append('sync')
@@ -115,6 +116,26 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.calls.index('stop:other'),self.calls.index('remove'))
         self.assertEqual(await self.provider.members('c'),[])
 
+    async def test_two_writer_reconciliation_stops_both_before_group_mutation(self):
+        workspace=await self.service.get('w')
+        await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')
+        course=(await self.provider.courses())[0]
+        binding={**course['workspace_bindings'][0],'hub_server':'rtc2'}
+        await self.provider.put('courses',{**course,'workspace_bindings':course['workspace_bindings']+[binding]},actor='admin')
+        await self.service.reconcile_snapshot({'course':course,'groups':[{'id':'g'}],
+            'members':await self.provider.members('c'),'groupings':[]},actor='reconciler')
+        self.assertLess(self.calls.index('stop:w2'),self.calls.index('sync'))
+        self.assertLess(self.calls.index('stop:w'),self.calls.index('sync'))
+        self.assertEqual(self.calls.count('sync'),1)
+        self.assertEqual(self.calls.count('shares'),2)
+
+    async def test_empty_assignment_cannot_claim_read_only_archive(self):
+        await self.provider.put('assignments',{'id':'empty','course_id':'c','mode':'manual'},actor='admin')
+        assignment=next(a for a in await self.provider.list('assignments') if a['id']=='empty')
+        with self.assertRaisesRegex(RuntimeError,'storage targets'):
+            await self.service.close_assignment(assignment,actor='teacher')
+        self.assertNotIn('archive',self.calls)
+
     async def test_fake_source_uses_same_access_sink_without_provider_mutations(self):
         class Fake:
             async def courses(self):return [{'id':'c','source':'fake'}]
@@ -122,7 +143,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
             async def groups(self,course):return [{'id':'g'}]
             async def groupings(self,course):return []
         await reconcile(Fake(),lambda snapshot:self.service.reconcile_snapshot(snapshot,actor='reconciler'))
-        self.assertEqual(self.calls,['stop:w','release','validate','register','sync','shares'])
+        self.assertEqual(self.calls,['stop:w','release','revoke','validate','register','sync','shares'])
 
 
 class BoundaryTests(unittest.TestCase):

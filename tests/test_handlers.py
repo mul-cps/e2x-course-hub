@@ -163,6 +163,18 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Denied'})).code,403)
         self.assertEqual(self.fetch('/records/courses').code,403)
 
+    def test_membership_mutations_blocked_while_starting_or_reconciling(self):
+        async def seed(state):
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'c'},actor='admin')
+            await self.provider.put('workspaces',{'id':'w','course_id':'c','group_id':'g','state':state},actor='admin')
+        for state in ('starting','reconciling'):
+            self.io_loop.run_sync(lambda:seed(state))
+            response=self.fetch('/records/memberships',method='POST',body=json.dumps(
+                {'id':'new','course_id':'c','group_id':'g','person_id':'existing-name'}))
+            self.assertEqual(response.code,409)
+            self.assertEqual(self.io_loop.run_sync(lambda:self.provider.members('c')),[])
+
     def test_closed_record_shapes_and_cross_course_references_rejected(self):
         async def seed():
             await self.provider.put('courses',{'id':'a'},actor='admin')

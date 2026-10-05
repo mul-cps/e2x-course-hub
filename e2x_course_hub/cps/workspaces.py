@@ -85,7 +85,7 @@ class UnconfiguredFilesystemAdapter:
     async def provision(self, workspace, *, actor):
         raise RuntimeError("Workspace filesystem provisioning adapter is not qualified")
 
-    async def archive(self, workspaces, *, actor):
+    async def archive(self, workspaces, *, actor, assignment=None):
         raise RuntimeError('Read-only filesystem archive adapter is not qualified')
 
 
@@ -137,6 +137,8 @@ class WorkspaceService:
             workspace={**workspace,'course_ceiling':course['resource_ceiling'],
                        'namespace':bindings[0].get('namespace'), 'pod':bindings[0].get('pod')}
             await self.hub.assert_stopped(workspace)
+            # Persist the guard before asynchronous provisioning/registration/Hub calls.
+            await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor)
             await self.filesystem.provision(workspace,actor=actor)
             members = await self.members(workspace)
             validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
@@ -150,6 +152,7 @@ class WorkspaceService:
                 reservation = await self.compute.reservation_state(identifier)
                 await self.hub.stop_confirmed(workspace)
                 await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=reservation.get("attempt"))
+                await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
                 raise
             await self.provider.put('workspaces',{**workspace,'state':'running'},actor=actor)
 
@@ -209,7 +212,9 @@ class WorkspaceService:
             await self.close(workspace['id'],actor=actor,archive=True)
         await self.provider.put('assignments',{**assignment,'state':'closed','archive_pending':True},actor=actor)
         try:
-            evidence = await self.filesystem.archive(workspaces,actor=actor)
+            if not workspaces:
+                raise RuntimeError('No qualified workspace storage targets; assignment archive requires operator reconciliation')
+            evidence = await self.filesystem.archive(workspaces,actor=actor,assignment=assignment)
             if not isinstance(evidence,dict) or evidence.get('read_only_verified') is not True or not evidence.get('evidence'):
                 raise RuntimeError('Filesystem adapter must verify read-only archive and return evidence')
         except Exception:
@@ -227,35 +232,46 @@ class WorkspaceService:
         """The same normalized provider sink, with no external provider writes."""
         course = snapshot['course']
         groups = {group['id']: group for group in snapshot['groups']}
-        for workspace in await self.provider.list('workspaces'):
-            if workspace.get('course_id') != course['id']:
-                continue
-            group = groups.get(workspace['group_id'])
-            if group is None or workspace.get('archive_pending') or workspace.get('archived'):
-                await self.close(workspace['id'],actor=actor)
-                continue
-            from .expiry import active
-            members = [m for m in snapshot['members'] if m.get('group_id') == group['id'] and active(m)]
-            # Reconcile access only after interrupting every existing visitor.
-            async with self.locks.setdefault(workspace['id'],asyncio.Lock()):
+        workspaces = sorted([w for w in await self.provider.list('workspaces')
+                             if w.get('course_id') == course['id']],key=lambda w:w['id'])
+        async with AsyncExitStack() as stack:
+            for workspace in workspaces:
+                await stack.enter_async_context(self.locks.setdefault(workspace['id'],asyncio.Lock()))
+            # Persist mutation guards across every awaited stop and group update.
+            for workspace in workspaces:
+                await self.provider.put('workspaces',{**workspace,'state':'reconciling'},actor=actor)
+            # Stop every associated writer before touching any shared group access.
+            for workspace in workspaces:
                 reservation = await self.compute.reservation_state(workspace['id'])
                 await self.hub.stop_confirmed(workspace)
                 await self.compute.release_after_shutdown(workspace['id'],confirmed_by_hub=True,
                                                          actor=actor,attempt=reservation.get('attempt'))
+            for group_id in sorted({w['group_id'] for w in workspaces}):
+                grouped = [w for w in workspaces if w['group_id']==group_id]
+                eligible = [w for w in grouped if group_id in groups and
+                            not w.get('archive_pending') and not w.get('archived')]
+                for workspace in grouped:
+                    await self.hub.revoke_shares(workspace)
+                if not eligible:
+                    continue
+                from .expiry import active
+                members = [m for m in snapshot['members'] if m.get('group_id')==group_id and active(m)]
                 people = sorted({m.get('canonical_person_id') for m in members if m.get('canonical_person_id')})
                 if not people or any(not m.get('canonical_person_id') for m in members):
-                    await self.hub.revoke_shares(workspace)
                     raise ValueError('Explicit verified canonical members required for reconciliation')
                 configured = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
-                bindings = [b for b in (configured or {}).get('workspace_bindings',[])
-                            if all(b.get(k)==workspace.get(k) for k in ('group_id','hub_user','hub_server'))]
-                if len(bindings)!=1 or configured.get('resource_ceiling') is None:
-                    raise ValueError('Operator-qualified course binding required for reconciliation')
-                registered={**workspace,'namespace':bindings[0].get('namespace'),
-                            'pod':bindings[0].get('pod'),'course_ceiling':configured['resource_ceiling']}
-                validation = await self.compute.validate_workspace(workspace['id'],people,
-                                    workspace['profile'],registered['course_ceiling'])
-                await self.compute.register_workspace(registered,people,validation)
-                await self.hub.sync_group(workspace,members)
-                await self.hub.replace_shares(workspace,group['id'])
+                for workspace in eligible:
+                    bindings = [b for b in (configured or {}).get('workspace_bindings',[])
+                                if all(b.get(k)==workspace.get(k) for k in ('group_id','hub_user','hub_server'))]
+                    if len(bindings)!=1 or configured.get('resource_ceiling') is None:
+                        raise ValueError('Operator-qualified course binding required for reconciliation')
+                    registered={**workspace,'namespace':bindings[0].get('namespace'),
+                                'pod':bindings[0].get('pod'),'course_ceiling':configured['resource_ceiling']}
+                    validation = await self.compute.validate_workspace(workspace['id'],people,
+                                        workspace['profile'],registered['course_ceiling'])
+                    await self.compute.register_workspace(registered,people,validation)
+                await self.hub.sync_group(eligible[0],members)
+                for workspace in eligible:
+                    await self.hub.replace_shares(workspace,group_id)
+            for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)

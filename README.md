@@ -464,7 +464,7 @@ does not grant this operator role itself.
 Configure `CourseServiceApp.filesystem_adapter_class` to an operator-owned dotted
 Python class import. Its async `provision(workspace, actor=...)` must provision or
 verify the exact existing storage, ownership and writable group mount without
-renaming or deleting files. Its async `archive(workspaces, actor=...)` must identify
+renaming or deleting files. Its async `archive(workspaces, actor=..., assignment=...)` must identify
 **all** storage writers, prove their shutdown (including writers outside Hub),
 apply read-only enforcement at the filesystem/storage boundary, test denied writes
 through every retained mount, preserve all files and return a dict containing
