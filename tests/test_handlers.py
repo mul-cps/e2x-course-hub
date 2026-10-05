@@ -66,6 +66,19 @@ class HandlersTest(AsyncHTTPTestCase):
         response=self.fetch('/records/groups',method='DELETE',body=json.dumps({'id':'g'}),allow_nonstandard_methods=True)
         self.assertEqual(response.code,409)
 
+    def test_membership_move_cannot_bypass_old_workspace_shutdown(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'a'},actor='admin')
+            await self.provider.put('courses',{'id':'b'},actor='admin')
+            await self.provider.put('memberships',{'id':'m','course_id':'a','group_id':'ga','person_id':'alice','canonical_person_id':'p1'},actor='admin')
+            await self.provider.put('workspaces',{'id':'w','course_id':'a','group_id':'ga','state':'running'},actor='admin')
+        self.io_loop.run_sync(seed)
+        response=self.fetch('/records/memberships',method='POST',body=json.dumps({'id':'m','course_id':'b','group_id':'gb','person_id':'bob','canonical_person_id':'p2'}))
+        self.assertEqual(response.code,409)
+        records=self.io_loop.run_sync(lambda:self.provider.list('memberships'))
+        self.assertEqual(records[0]['person_id'],'alice')
+        self.assertEqual(records[0]['course_id'],'a')
+
     def test_latest_admin_state_authoritative_not_stale_login(self):
         self.admin=False
         self.assertEqual(self.fetch('/records/courses').code,403)

@@ -30,10 +30,14 @@ class RecordsHandler(BaseAPIHandler):
         if kind == 'groups' and any(w.get('group_id') == data.get('id') for w in await self.settings['course_provider'].list('workspaces')):
             raise web.HTTPError(409,reason='Referenced workspace group requires controlled lifecycle update')
         if kind == 'memberships':
-            records = await self.settings['course_provider'].members(data.get('course_id'))
+            records = await self.settings['course_provider'].list('memberships')
             previous = next((r for r in records if r['id']==data.get('id')), {})
             groups = {data.get('group_id'),previous.get('group_id')}
-            if any(w.get('group_id') in groups and w.get('state') != 'stopped' for w in await self.settings['course_provider'].list('workspaces')):
+            workspaces = await self.settings['course_provider'].list('workspaces')
+            identity_fields = ('course_id','group_id','person_id','canonical_person_id')
+            if previous and any(w.get('group_id') == previous.get('group_id') for w in workspaces) and any(data.get(k) != previous.get(k) for k in identity_fields):
+                raise web.HTTPError(409,reason='Referenced membership identity changes require controlled removal/reassignment')
+            if any(w.get('group_id') in groups and w.get('state') != 'stopped' for w in workspaces):
                 raise web.HTTPError(409,reason='Stop affected shared workspace before changing membership')
         try:
             result = await self.settings['course_provider'].put(kind, data, actor=actor)
