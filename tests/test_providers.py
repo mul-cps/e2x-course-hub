@@ -71,3 +71,14 @@ class ImportAtomicityTest(unittest.TestCase):
                 self.assertEqual(provider.audit(), [])
             asyncio.run(run())
             provider.db.close()
+
+class UpstreamCapabilityTest(unittest.TestCase):
+    def test_external_membership_edits_rejected_by_existing_backend(self):
+        from types import SimpleNamespace as NS
+        from e2x_course_hub.api.course_api import CourseAPI
+        api = CourseAPI.__new__(CourseAPI)
+        api.server = NS(courses={'c':NS(metadata=NS(source='moodle'), terms={'t':{'profile':{}}}, config=NS(terms={'t':NS(source='local')}))})
+        with self.assertRaisesRegex(PermissionError, 'read-only'):
+            api.ensure_local_editable('c','t')
+        api.server.courses['c'].metadata.source = 'local'
+        api.ensure_local_editable('c','t')
