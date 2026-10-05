@@ -13,7 +13,7 @@ service tokens, SQLite PVCs and console instances. Run one replica per database.
 `database_path` must point to persistent storage. Back up using SQLite's backup API
 (`LocalCourseProvider.backup`) rather than copying a live database. Restore with
 the matching application revision and Hub database; test restoration before promotion.
-The initial SQLite schema is version 1 (`PRAGMA user_version`).
+The initial SQLite schema is version 3 (`PRAGMA user_version`).
 
 ```python
 c.CourseServiceApp.console_owner = 'cps'
@@ -156,18 +156,21 @@ Normalized record validation rejects unknown fields and wrong types, checks owne
 term, group and grouping references, and prevents silent course/term reassociation of
 existing IDs. Group deletion preserves membership/workspace/grouping references.
 
-Identity authority is explicitly verified or administrator-reviewed **normalized email**.
-`reviewed_email_mapping` takes explicit existing `(hub, username, email)` rows and proof
+Identity authority is explicitly verified or administrator-reviewed **normalized email**, linked to an explicitly supplied stable canonical **person UUID**.
+`reviewed_email_mapping` takes explicit existing `(hub, username, email, person_id)` rows and proof
 flags, rejects missing/unreviewed/duplicate mappings, and never infers email from a username.
-Different CPS/CIT usernames may link to the same reviewed email. `POST /api/identities`
-is administrator-only and persists owned links. Membership canonical email values must
-match those stored links. Existing username/path identifiers remain unchanged.
+Different CPS/CIT usernames may link to the same reviewed email and UUID. `POST /api/identities`
+is administrator-only and persists owned links. Membership canonical UUID values must
+match those stored links; normalized email remains metadata and the reviewed linkage authority. Existing username/path identifiers remain unchanged.
 `import_upstream(..., reviewed_identity_rows=...)` fails on missing user mappings; an
 import without this argument preserves records but intentionally supplies no canonical
 identity and cannot reserve GPU workspaces until mappings are explicitly reviewed.
 No production identity mapping has been generated or installed.
 
-Schema version 2 adds reviewed email links while preserving all version-1 record keys.
+Schema version 3 adds explicit canonical UUID links while preserving earlier record keys.
+Earlier email-only links receive no inferred UUID: explicit administrator-reviewed mappings
+are required to migrate affected membership canonical IDs, and active workspaces must
+stop before that migration. Existing usernames, membership IDs and references remain intact.
 Request-level audit covers every console/upstream API mutation outcome, including invalid
 JSON, denied authorization, DELETE, assignment and lifecycle failures. Provider mutations
 are audited on success/failure; Hub API writes capture actual request actor and observed
@@ -188,3 +191,8 @@ and per-controlled-group filters for `read:users`, `read:groups`, `groups`, `ser
 provisioning (disabled by default). Service OAuth access scopes and visitors are separate
 from this server-side token. Qualify the exact Hub scope names/filters against the pinned
 Hub before deployment; never give the browser these service credentials.
+
+Time-bounded local teaching memberships validate timezone-aware `starts`/`expires`.
+An explicitly matched expired/future membership makes its Hub role group ineffective in
+console and existing upstream course permission checks, even when login retained that
+group. Unimported groups retain existing behavior until the reviewed grant migration.

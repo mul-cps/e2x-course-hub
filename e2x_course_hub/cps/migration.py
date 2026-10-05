@@ -22,7 +22,7 @@ async def import_upstream(server, hub_api, provider, *, actor, reviewed_identity
                     canonical = {}
                     if mapping is not None:
                         if (provider.console,username) not in mapping: raise ValueError('missing reviewed email mapping for existing user: '+username)
-                        canonical = {'canonical_person_id':mapping[(provider.console,username)]}
+                        canonical = {'canonical_person_id':mapping[(provider.console,username)]['person_id']}
                     records['memberships'].append({**canonical,'id': f'{group_id}:{username}', 'course_id': course_id,
                         'term_id': term_id, 'person_id': username, 'role': role, 'group_id': group_id})
     # Nothing is removed from Hub, YAML or storage. Canonical person aliases require reviewed mapping.

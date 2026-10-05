@@ -107,8 +107,8 @@ async def validate(provider,kind,record):
     if len(result.get('group_ids',[]))!=len(set(result.get('group_ids',[]))):
         raise ValueError('duplicate group references')
     if kind=='memberships' and result.get('canonical_person_id') is not None:
-        linked=provider.db.execute('SELECT email FROM email_links WHERE console=? AND username=?',
+        linked=provider.db.execute('SELECT canonical_person_id FROM email_links WHERE console=? AND username=?',
             (provider.console,result['person_id'])).fetchone()
-        if not linked or linked['email']!=result['canonical_person_id']:
-            raise ValueError('membership canonical email requires an explicit verified/reviewed account mapping')
+        if not linked or linked['canonical_person_id']!=result['canonical_person_id']:
+            raise ValueError('membership canonical UUID requires an explicit verified/reviewed account mapping')
     return result

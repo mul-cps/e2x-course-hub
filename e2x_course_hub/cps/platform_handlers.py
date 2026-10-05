@@ -1,4 +1,5 @@
 """Authenticated console operations. Central policy remains the resource authority."""
+import sqlite3
 import json
 from tornado import web
 from tornado.httpclient import HTTPClientError
@@ -150,7 +151,7 @@ class IdentityMappingHandler(RecordsHandler):
         if any(not isinstance(row,dict) for row in data['mappings']):raise web.HTTPError(400,reason='Mapping rows must be objects')
         if any(row.get('hub')!=self.settings['console_owner'] for row in data['mappings']):raise web.HTTPError(403,reason='Console can link only its own Hub accounts')
         try:result=await self.settings['course_provider'].link_identities(data['mappings'],actor=actor)
-        except (ValueError,TypeError) as error:raise web.HTTPError(400,reason=str(error))
+        except (ValueError,TypeError,sqlite3.IntegrityError) as error:raise web.HTTPError(400,reason=str(error))
         self.write({'linked':result})
 
 default_handlers.append((r'/api/identities',IdentityMappingHandler))
