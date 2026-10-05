@@ -84,8 +84,15 @@ class LocalCourseProvider:
         if not previous: raise KeyError(identifier)
         if json.loads(previous['payload']).get('source') != 'local': raise PermissionError('externally managed record')
         if kind == 'groups':
-            if any(w.get('group_id') == identifier for w in await self.list('workspaces')):
-                raise ValueError('group still has a workspace reference; controlled lifecycle required')
+            children = await self.list('workspaces') + await self.list('memberships')
+            if any(w.get('group_id') == identifier for w in children):
+                raise ValueError('group still has workspace/membership references; controlled lifecycle required')
+        if kind == 'terms':
+            term = json.loads(previous['payload'])
+            term_id = term.get('term_id',identifier)
+            for child in ('memberships','groups','assignments','workspaces'):
+                if any(r.get('term_id') == term_id for r in await self.list(child,term['course_id'])):
+                    raise ValueError('term still has references; controlled lifecycle required')
         if kind == 'courses':
             for child in KINDS[1:]:
                 if await self.list(child, identifier): raise ValueError('course still has referenced records; archive workspaces first')
