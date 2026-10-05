@@ -100,6 +100,14 @@ JupyterLab PageConfig `cpsComputeGatewayUrl` must be the same-origin path
 `/api/compute/xsrf` endpoint (`Cache-Control: no-store`) and send its `xsrf_token` as
 `X-XSRFToken` on writes. Notebook JavaScript cannot read the console-path cookie directly.
 
+The bridge also permits `POST /api/compute/v1/workflows/<key>/artifacts/retain`
+with the gateway's fixed artifact body (`snapshot` or `executed-notebook`). It
+preserves visitor authentication and CSRF checks; the gateway checks ownership
+and coordinates retention against deletion. A deletion claim returns 409, and a
+disabled lifecycle returns 503. Delete and unretain routes remain unavailable.
+This additive route requires the compatible compute lifecycle release; it does
+not enable cleanup or grant console users administrative credentials.
+
 ## OAuth
 
 State validation is retained from pinned JupyterHub 5.5.2. The wrapper rejects external,

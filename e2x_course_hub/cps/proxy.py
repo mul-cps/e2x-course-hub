@@ -7,7 +7,7 @@ from ..course_service.handlers.base import BaseHandler
 
 ROUTES = {
     'GET': re.compile(r'(me|profiles|session|workspaces|workflows(?:/[A-Za-z0-9_.-]+(?:/(?:logs|artifacts))?)?)\Z'),
-    'POST': re.compile(r'(workflows|notebook-submissions|workflows/[A-Za-z0-9_.-]+/terminate)\Z'),
+    'POST': re.compile(r'(workflows|notebook-submissions|workflows/[A-Za-z0-9_.-]+/(?:terminate|artifacts/retain))\Z'),
 }
 
 class ComputeVisitorProxy(BaseHandler):

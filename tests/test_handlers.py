@@ -233,6 +233,31 @@ class CSRFBootstrapTest(AsyncHTTPTestCase):
             (r'/services/console/api/compute/v1/(.*)',Proxy)],cookie_secret='test',xsrf_cookies=True,
             compute_gateway_url='https://gateway.example',console_owner='cps')
 
+    def test_artifact_retain_preserves_visitor_csrf_and_gateway_conflict(self):
+        bootstrap=self.fetch('/services/console/api/compute/xsrf',headers={'X-Visitor':'alice'})
+        token=json.loads(bootstrap.body)['xsrf_token']
+        path='/services/console/api/compute/v1/workflows/cps-fixture/artifacts/retain'
+        body=json.dumps({'artifact':'executed-notebook'})
+        calls=[]
+        class Client:
+            async def fetch(self,request,**kwargs):
+                calls.append(request)
+                return NS(code=409,headers={'Content-Type':'application/json'},body=b'{"detail":"deletion claimed"}')
+        with patch('e2x_course_hub.cps.proxy.AsyncHTTPClient',return_value=Client()):
+            self.assertEqual(self.fetch(path,method='POST',body=body,headers={'X-Visitor':'alice'}).code,403)
+            self.assertEqual(self.fetch(path,method='POST',body=body,headers={'X-Visitor':'bob','X-XSRFToken':token}).code,403)
+            result=self.fetch(path,method='POST',body=body,headers={'X-Visitor':'alice','X-XSRFToken':token,'Content-Type':'application/json','Authorization':'Bearer user-controlled'})
+            self.assertEqual(result.code,409)
+            self.assertEqual(json.loads(result.body)['detail'],'deletion claimed')
+            for suffix in ('/delete','/unretain','/artifacts/../retain'):
+                rejected=self.fetch('/services/console/api/compute/v1/workflows/cps-fixture'+suffix,method='POST',body=body,headers={'X-Visitor':'alice','X-XSRFToken':token})
+                self.assertEqual(rejected.code,404)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0].url,'https://gateway.example/v1/workflows/cps-fixture/artifacts/retain')
+        self.assertEqual(calls[0].headers['Authorization'],'Bearer alice')
+        self.assertEqual(calls[0].headers['X-CPS-Hub'],'cps')
+        self.assertEqual(calls[0].body,body.encode())
+
     def test_bootstrap_token_enables_write_and_is_visitor_bound(self):
         bootstrap=self.fetch('/services/console/api/compute/xsrf',headers={'X-Visitor':'alice'})
         self.assertEqual(bootstrap.code,200)
