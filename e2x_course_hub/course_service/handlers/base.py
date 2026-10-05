@@ -83,7 +83,7 @@ class BaseAPIHandler(BaseHandler):
         updated_user = await self.course_api.hub_api.get_user(hub_user["name"])
         return User(
             username=hub_user["name"],
-            admin=hub_user.get("admin", False),
+            admin=updated_user.get("admin", False),
             groups=updated_user.get("groups", []),
         )
 

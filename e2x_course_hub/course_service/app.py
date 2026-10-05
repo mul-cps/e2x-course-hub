@@ -2,7 +2,7 @@ import os
 import time
 
 from jinja2 import Environment, FileSystemLoader
-from jupyterhub.services.auth import HubOAuthCallbackHandler
+from jupyterhub.services.auth import HubOAuth, HubOAuthCallbackHandler
 from jupyterhub.utils import url_path_join as ujoin
 from tornado import web
 from traitlets import Bool, Dict, Integer, List, Unicode
@@ -11,6 +11,9 @@ from traitlets.config import Application
 from ..api.api import API
 from ..api.course_api import HubAPI
 from ._data import DATA_FILES_PATH
+from ..cps.providers import configure_provider
+from ..cps.oauth import SafeOAuthCallbackHandler
+from ..cps.handlers import default_handlers as cps_handlers
 from .handlers import apihandlers, handlers
 
 
@@ -85,7 +88,13 @@ class CourseServiceApp(Application):
         ),
     ).tag(config=True)
 
+    console_owner = Unicode('cps', help='Console record owner: cps or cit').tag(config=True)
+    database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
+    course_providers = Dict(default_value={'local': {'enabled': True}, 'moodle': {'enabled': False}}, help='Course provider configuration').tag(config=True)
+
     def init_tornado_settings(self):
+        HubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
+        provider = configure_provider(self.course_providers, self.database_path, self.console_owner)
         hub_api = HubAPI(api_token=self.api_token, api_url=self.api_url)
         api = API(
             server_config_file=self.server_config_file,
@@ -97,6 +106,9 @@ class CourseServiceApp(Application):
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))
         settings = {
             "api": api,
+            "course_provider": provider,
+            "xsrf_cookies": True,
+            "cookie_options": {"secure": True, "httponly": True, "samesite": "Lax"},
             "refresh_interval": self.refresh_interval,
             "last_config_check": time.time(),
             "logger": self.log,
@@ -115,10 +127,10 @@ class CourseServiceApp(Application):
             ),
             (
                 ujoin(self.service_prefix, "oauth_callback"),
-                HubOAuthCallbackHandler,
+                SafeOAuthCallbackHandler,
             ),
         ]
-        for pattern, handler in apihandlers.default_handlers + handlers.default_handlers:
+        for pattern, handler in apihandlers.default_handlers + cps_handlers + handlers.default_handlers:
             full_pattern = ujoin(self.service_prefix, pattern.lstrip("/"))
             app_handlers.append((full_pattern, handler))
         self.handlers = app_handlers

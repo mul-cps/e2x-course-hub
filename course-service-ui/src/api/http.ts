@@ -3,7 +3,7 @@ export const getCookie = (name: string): string | null => {
   if (document.cookie && document.cookie !== "") {
     for (const cookie of document.cookie.split(";")) {
       if (cookie.trim().startsWith(`${name}=`)) {
-        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+        cookieValue = decodeURIComponent(cookie.trim().substring(name.length + 1));
         break;
       }
     }

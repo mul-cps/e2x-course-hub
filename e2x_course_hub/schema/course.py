@@ -36,6 +36,9 @@ class CourseMetadata(BaseModel):
     Metadata information about a course.
     """
 
+    source: str = "local"
+    external_id: Optional[str] = None
+
     course_id: str = Field(..., description="The id of the course.")
     course_name: str = Field(..., description="The full name of the course")
     description: Optional[str] = Field(
@@ -58,6 +61,9 @@ class TermConfig(ConfigWithRuntimeOverrides):
     """
     Configuration for a specific term/session within a course.
     """
+
+    source: str = "local"
+    external_id: Optional[str] = None
 
     allowed_profiles: List[str] = Field(..., description="List of profiles enabled for the term.")
 

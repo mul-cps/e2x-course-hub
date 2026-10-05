@@ -177,6 +177,12 @@ class CourseAPI(BaseAPI):
         # Then, reduce to strongest role only
         return members
 
+    def ensure_local_editable(self, course_id, term_id):
+        self._ensure_course_and_term_exist(course_id, term_id)
+        course = self.server.courses[course_id]
+        if course.metadata.source != 'local' or course.config.terms[term_id].source != 'local':
+            raise PermissionError('External course memberships are read-only; reviewed migration required')
+
     async def add_course_members(
         self,
         user: User,
@@ -199,6 +205,7 @@ class CourseAPI(BaseAPI):
             ValueError: If the role doesn't exist or group doesn't exist
         """
         # Check permission
+        self.ensure_local_editable(course_id, term_id)
         self.require_permission(
             user=user,
             course_id=course_id,
@@ -256,6 +263,7 @@ class CourseAPI(BaseAPI):
         strongest_role = self.server.roles.get_strongest_role(user_roles)
         if strongest_role is None:
             return  # No valid role found
+        self.ensure_local_editable(course_id, term_id)
         self.require_permission(
             user=user,
             course_id=course_id,
@@ -295,6 +303,7 @@ class CourseAPI(BaseAPI):
             for role in user_roles:
                 role_to_usernames.setdefault(role, []).append(username)
         # Remove users role by role
+        self.ensure_local_editable(course_id, term_id)
         for role, users_in_role in role_to_usernames.items():
             self.require_permission(
                 user=user,
@@ -330,6 +339,7 @@ class CourseAPI(BaseAPI):
             ValueError: If the group doesn't exist
         """
         # Check permission
+        self.ensure_local_editable(course_id, term_id)
         self.require_permission(
             user=user,
             course_id=course_id,
@@ -423,6 +433,7 @@ class CourseAPI(BaseAPI):
             course_id: The course ID
             term_id: The term ID
         """
+        self.ensure_local_editable(course_id, term_id)
         self.require_permission(
             user=user,
             course_id=course_id,

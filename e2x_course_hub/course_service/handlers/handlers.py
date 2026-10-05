@@ -15,6 +15,7 @@ class RootHandler(BaseHandler):
 class HomeHandler(BaseTemplateHandler):
     @web.authenticated
     async def get(self):
+        self.xsrf_token  # Set the readable CSRF token before rendering the browser client.
         self.render_template("react_base.j2")
 
 

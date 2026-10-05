@@ -13,7 +13,7 @@ export interface ApiError extends Error {
 const baseSettings: RequestInit = {
   credentials: "same-origin" as RequestCredentials,
   headers: {
-    "X-CSRFToken": getCookie("_xsrf") || "",
+    "X-XSRFToken": getCookie("_xsrf") || "",
   },
 };
 

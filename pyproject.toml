@@ -26,7 +26,9 @@ classifiers = [
 dependencies = [
   "pydantic>=2.0",
   "jinja2",
-  "PyYAML"
+  "PyYAML",
+  "jupyterhub==5.5.2",
+  "e2x-hub-rbac @ git+https://github.com/DigiKlausur/e2x-hub-rbac.git@4683d1a09051f8aa0d38a2e6ab181b4979b246b2"
 ]
 
 [project.urls]
