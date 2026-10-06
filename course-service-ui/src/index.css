@@ -748,3 +748,21 @@ button:focus-visible {
     gap: 16px;
   }
 }
+
+/* Refinement 1: calmer hierarchy, balanced cards and readable secondary text. */
+.admin-body main { padding-top:32px; }
+.page-heading { margin-bottom:30px; }
+.page-heading h1 { font-size:30px; font-weight:680; }
+.page-heading p:not(.eyebrow),.overview-card p,.info-card p,.integration-card p { color:#596b82; }
+.eyebrow,.nav-label { color:#61748d; }
+.section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 15px; }
+.section-heading h2 { color:#30445e; font-size:14px; font-weight:650; }
+.section-heading span { color:#64758c; font-size:12px; }
+.overview-grid { gap:16px; }
+.overview-card { padding:22px; box-shadow:0 1px 2px #1e385305; }
+.overview-card h2 { margin-top:18px; }
+.overview-card span { margin-top:18px; }
+.overview-footer { margin-top:24px; gap:16px; }
+.info-card { background:#edf2f9; padding:20px; }
+.field-help,.record-count { color:#64758c; }
+@media(max-width:760px) { .section-heading span { display:none; } .page-heading h1 { font-size:26px; } }

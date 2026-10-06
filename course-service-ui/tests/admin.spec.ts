@@ -129,7 +129,7 @@ test("overview navigation and responsive layout", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Welcome, admin" }),
   ).toBeVisible();
-  await expect(page.locator(".overview-card")).toHaveCount(5);
+  await expect(page.locator(".overview-card")).toHaveCount(6);
   await page.screenshot({
     path: "/tmp/cps-admin-ui-qa/overview-desktop.png",
     fullPage: true,

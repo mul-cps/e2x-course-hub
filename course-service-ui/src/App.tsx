@@ -33,7 +33,7 @@ function Overview() {
     <section className="admin-page">
       <div className="page-heading">
         <div>
-          <p className="eyebrow">Your administration workspace</p>
+          <p className="eyebrow">Teaching & research</p>
           <h1>Welcome, {config.user.name}</h1>
           <p>
             Manage teaching, collaboration and compute access from one place.
@@ -43,8 +43,9 @@ function Overview() {
           Manage courses <ChevronRight size={16} />
         </Link>
       </div>
+      <div className="section-heading"><h2>Quick access</h2><span>Teaching, research and collaboration</span></div>
       <div className="overview-grid">
-        {navigation.slice(1, 6).map(({ path, label, icon: Icon }) => (
+        {navigation.slice(1, 7).map(({ path, label, icon: Icon }) => (
           <Link className="overview-card" key={path} to={path}>
             <div className="card-icon">
               <Icon size={22} />
@@ -63,6 +64,7 @@ function Overview() {
                     "Manage shared notebooks and approved compute profiles.",
                   "/assignments":
                     "Allocate collaboration groups and close assignments.",
+                  "/audit": "Review administrative changes and their outcomes.",
                 }[path]
               }
             </p>
@@ -89,8 +91,7 @@ function Overview() {
           <div>
             <h2>Local course management is active</h2>
             <p>
-              Moodle integration is planned. University SSO is awaiting ICT
-              registration.
+              Manage courses locally. Moodle integration is planned and remains disabled.
             </p>
             <Link to="/integrations">View integrations →</Link>
           </div>
