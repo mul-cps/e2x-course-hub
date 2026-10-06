@@ -218,6 +218,8 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('archive',self.calls)
 
     async def test_fake_source_uses_same_access_sink_without_provider_mutations(self):
+        before = {kind: await self.provider.list(kind)
+                  for kind in ('courses', 'memberships', 'groups', 'groupings', 'workspaces')}
         class Fake:
             async def courses(self):return [{'id':'c','source':'fake'}]
             async def members(self,course):return [{'group_id':'g','person_id':'unchanged','canonical_person_id':'00000000-0000-4000-8000-000000000001'}]
@@ -225,6 +227,18 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
             async def groupings(self,course):return []
         await reconcile(Fake(),lambda snapshot:self.service.reconcile_snapshot(snapshot,actor='reconciler'))
         self.assertEqual(self.calls,['stop:w','release','revoke','validate','register','sync','shares'])
+        # Reconciliation changes access/lifecycle, never hands local record ownership
+        # to the external source or silently replaces its roster.
+        for kind in ('memberships', 'groups', 'groupings'):
+            self.assertEqual(await self.provider.list(kind), before[kind])
+        course = (await self.provider.courses())[0]
+        self.assertEqual(course['source'], 'local')
+        self.assertFalse(course['reconciliation_pending'])
+        workspace = await self.service.get('w')
+        self.assertEqual(workspace['id'], before['workspaces'][0]['id'])
+        self.assertEqual(workspace['hub_user'], before['workspaces'][0]['hub_user'])
+        self.assertEqual(workspace['hub_server'], before['workspaces'][0]['hub_server'])
+        self.assertEqual(workspace['state'], 'stopped')
 
 
 class BoundaryTests(unittest.TestCase):

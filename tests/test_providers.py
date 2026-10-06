@@ -1,14 +1,21 @@
 import asyncio
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from e2x_course_hub.cps.providers import LocalCourseProvider, configure_provider, reconcile
 
 class ProvidersTest(unittest.TestCase):
     def test_disabled_moodle_and_enable_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            provider = configure_provider({'moodle': {'enabled': False, 'authSecretRef': 'never-read'}}, Path(tmp)/'db', 'cps')
+            with patch('e2x_course_hub.cps.providers.MoodleCourseProvider',
+                       side_effect=AssertionError('disabled provider initialized')) as moodle:
+                provider = configure_provider({'moodle': {'enabled': False,
+                    'baseUrl': 'https://must-not-connect.invalid',
+                    'authSecretRef': 'never-read', 'syncInterval': '10m'}}, Path(tmp)/'db', 'cps')
+                moodle.assert_not_called()
             self.assertIsInstance(provider, LocalCourseProvider)
+            provider.db.close()
             with self.assertRaisesRegex(ValueError, 'planned / not deployed'):
                 configure_provider({'moodle': {'enabled': True}}, Path(tmp)/'other', 'cps')
             self.assertFalse((Path(tmp)/'other').exists())
