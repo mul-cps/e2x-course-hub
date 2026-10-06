@@ -124,6 +124,20 @@ covers completed PKCE flow and replay rejection; deployed Hub compatibility rema
 Disabled Moodle causes no initialization, secret lookup, network requests or scheduling.
 Enabling it fails startup. No Moodle credentials, dependencies, jobs, CRDs, LTI login or
 setup wizard are installed. Local course management stays active.
+
+`tests/test_provider_startup.py` exercises complete `CourseServiceApp.initialize`
+for both console owners using isolated databases and synthetic Hub configuration.
+It guards socket connections, Tornado periodic-work startup and the configured
+Moodle secret-file path; disabled-provider construction is forbidden. Enabling
+Moodle must raise the planned/not-deployed configuration error before creating
+persistent console files. Provider/migration/reconciliation tests separately cover
+local CRUD, reference preservation and fake-source snapshots. These backend tests
+do not qualify production OAuth, rendered pages or a deployed release image.
+
+```sh
+python -m unittest discover -s tests
+```
+
 Official enrolment remains MUonline/CAMPUSonline authority. Moodle will own teaching
 rosters, roles and assignment groupings; compute policy owns resource entitlements;
 consoles own research projects and workspace lifecycle. The university enrolment bridge
