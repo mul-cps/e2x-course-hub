@@ -388,3 +388,8 @@ test("external records expose no edit or remove controls", async ({ page }) => {
     page.getByRole("button", { name: "Remove Official course" }),
   ).toHaveCount(0);
 });
+
+test('course tabs persist across refresh and mobile menu exposes all navigation',async({page})=>{
+ await page.goto('/courses');await page.getByRole('button',{name:'Members',exact:true}).click();await expect(page).toHaveURL(/tab=memberships/);await page.reload();await expect(page.getByRole('heading',{name:'Members',exact:true})).toBeVisible();
+ await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Open navigation'}).click();await expect(page.getByRole('navigation').getByRole('link',{name:'Integrations',exact:true})).toBeVisible();await page.getByRole('navigation').getByRole('link',{name:'Projects',exact:true}).click();await expect(page.getByRole('heading',{name:'Projects',exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'Open navigation'})).toHaveAttribute('aria-expanded','false');await page.screenshot({path:'/tmp/cps-admin-ui-qa/navigation-mobile.png',fullPage:true});
+});

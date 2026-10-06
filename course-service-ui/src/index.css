@@ -766,3 +766,21 @@ button:focus-visible {
 .info-card { background:#edf2f9; padding:20px; }
 .field-help,.record-count { color:#64758c; }
 @media(max-width:760px) { .section-heading span { display:none; } .page-heading h1 { font-size:26px; } }
+
+/* Refinement 2: persistent navigation and a complete mobile menu. */
+.mobile-menu-toggle { display:none; }
+.topbar strong { color:#435b79; font-weight:600; }
+.section-tabs button { padding:10px 14px; }
+.section-tabs button.active { box-shadow:0 1px 3px #20375408; }
+@media(max-width:760px) {
+ .admin-sidebar { position:relative; }
+ .brand { padding:0 48px 0 5px; }
+ .mobile-menu-toggle { display:flex; align-items:center; justify-content:center; position:absolute; right:18px; top:20px; width:38px; height:38px; background:#f4f7fb; border:1px solid #dce5f0; border-radius:8px; color:#395678; }
+ .admin-sidebar nav { display:none; }
+ .admin-sidebar.menu-open nav { display:grid; grid-template-columns:1fr 1fr; overflow:visible; margin-top:18px; padding-top:14px; border-top:1px solid #e8edf5; }
+ .admin-sidebar nav a { padding:12px 10px; }
+ .topbar>span { display:flex; }
+ .topbar { justify-content:space-between; padding:0 18px; font-size:11px; }
+ .topbar>a { font-size:0; gap:0; }
+ .topbar>a svg { width:17px; height:17px; }
+}

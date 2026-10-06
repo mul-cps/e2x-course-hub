@@ -1,4 +1,4 @@
-import { Routes, Route, NavLink, Link, Navigate } from "react-router-dom";
+import { Routes, Route, NavLink, Link, Navigate, useLocation, useSearchParams } from "react-router-dom";
 import {
   LayoutDashboard,
   GraduationCap,
@@ -11,6 +11,8 @@ import {
   ArrowUpRight,
   ShieldCheck,
   ChevronRight,
+  Menu,
+  X,
 } from "lucide-react";
 import { config } from "./config";
 import AdminRecords from "./components/AdminRecords";
@@ -101,7 +103,10 @@ function Overview() {
   );
 }
 function Courses() {
-  const [tab, setTab] = useState("courses");
+  const [params, setParams] = useSearchParams();
+  const allowedTabs = ["courses", "terms", "memberships", "groups", "groupings", "servers"];
+  const tab = allowedTabs.includes(params.get("tab") ?? "") ? params.get("tab")! : "courses";
+  const setTab = (next: string) => setParams(next === "courses" ? {} : {tab: next});
   return (
     <>
       <div className="section-tabs" aria-label="Course views">
@@ -155,9 +160,12 @@ function Courses() {
   );
 }
 function App() {
+  const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const current = navigation.find(item => item.path === location.pathname)?.label ?? (location.pathname.startsWith("/course/") ? "Course details" : "Administration");
   return (
     <div className="admin-shell">
-      <aside className="admin-sidebar">
+      <aside className={`admin-sidebar ${menuOpen ? "menu-open" : ""}`}>
         <Link to="/" className="brand">
           <div className="brand-mark">
             <Cpu size={23} />
@@ -166,10 +174,11 @@ function App() {
             Compute Platform<span>Administration</span>
           </div>
         </Link>
+        <button className="mobile-menu-toggle" aria-label={menuOpen ? "Close navigation" : "Open navigation"} aria-expanded={menuOpen} aria-controls="admin-navigation" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={20}/> : <Menu size={20}/>}</button>
         <p className="nav-label">WORKSPACE</p>
-        <nav aria-label="Administration">
+        <nav id="admin-navigation" aria-label="Administration">
           {navigation.map(({ path, label, icon: Icon }) => (
-            <NavLink end={path === "/"} key={path} to={path}>
+            <NavLink end={path === "/"} key={path} to={path} onClick={() => setMenuOpen(false)} className={({isActive}) => isActive || (path === "/courses" && location.pathname.startsWith("/course/")) ? "active" : ""}>
               <Icon size={18} />
               {label}
             </NavLink>
@@ -192,7 +201,7 @@ function App() {
       <div className="admin-body">
         <header className="topbar">
           <span>
-            Compute Platform <ChevronRight size={14} /> Administration
+            <Link to="/">Administration</Link> <ChevronRight size={14} /> <strong>{current}</strong>
           </span>
           <a href={`${config.baseUrl.split("/services/")[0]}/hub/home`}>
             Back to JupyterHub <ArrowUpRight size={14} />
