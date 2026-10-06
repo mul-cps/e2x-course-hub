@@ -218,3 +218,17 @@ Time-bounded local teaching memberships validate timezone-aware `starts`/`expire
 An explicitly matched expired/future membership makes its Hub role group ineffective in
 console and existing upstream course permission checks, even when login retained that
 group. Unimported groups retain existing behavior until the reviewed grant migration.
+
+### Distributed workload visitor bridge
+
+The authenticated compute proxy explicitly permits JobSet listing, inspection
+and logs by GET, plus fixed-descriptor submission and termination by POST.
+Named routes require the central `cps-js-` hexadecimal identifier; arbitrary Pod,
+artifact, internal, traversal and encoded routes remain excluded. Each request
+uses the actual visitor token and the console's trusted Hub selector. Browser
+Authorization headers cannot replace that token. The gateway independently
+checks canonical workload ownership and central submission policy. Pair this
+admin release with the compute gateway/addon release providing JobSet list/log
+endpoints; disabled distributed runtime remains disabled. Two-visitor proxy
+tests cover token separation and reject unsupported routes. Production OAuth
+and rendered addon qualification remain separate rollout requirements.

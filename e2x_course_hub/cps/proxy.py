@@ -6,8 +6,8 @@ from tornado.httpclient import AsyncHTTPClient, HTTPRequest
 from ..course_service.handlers.base import BaseHandler
 
 ROUTES = {
-    'GET': re.compile(r'(me|profiles|session|workspaces|workflows(?:/[A-Za-z0-9_.-]+(?:/(?:logs|artifacts))?)?)\Z'),
-    'POST': re.compile(r'(workflows|notebook-submissions|workflows/[A-Za-z0-9_.-]+/(?:terminate|artifacts/retain))\Z'),
+    'GET': re.compile(r'(me|profiles|session|workspaces|workflows(?:/[A-Za-z0-9_.-]+(?:/(?:logs|artifacts))?)?|jobsets(?:/cps-js-(?:[a-f0-9]{32}|[a-f0-9]{48})(?:/logs)?)?)\Z'),
+    'POST': re.compile(r'(workflows|notebook-submissions|workflows/[A-Za-z0-9_.-]+/(?:terminate|artifacts/retain)|jobsets|jobsets/cps-js-(?:[a-f0-9]{32}|[a-f0-9]{48})/terminate)\Z'),
 }
 
 class ComputeVisitorProxy(BaseHandler):

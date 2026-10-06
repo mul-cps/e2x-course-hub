@@ -72,6 +72,25 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual([c.headers['Idempotency-Key'] for c in calls],['request-alice','request-bob'])
         self.assertTrue(all(c.url=='https://gateway.example/v1/me' for c in calls))
 
+    def test_jobset_routes_keep_each_visitor_token_and_deny_other_resources(self):
+        calls=[]
+        class Client:
+            async def fetch(self,request,**kwargs):
+                calls.append(request)
+                return NS(code=200,headers={'Content-Type':'application/json'},body=b'{}')
+        name='cps-js-'+'a'*32
+        with patch('e2x_course_hub.cps.proxy.AsyncHTTPClient',return_value=Client()):
+            for visitor in ['alice','bob']:
+                for path in ['jobsets?cursor=opaque','jobsets/'+name,'jobsets/'+name+'/logs?tail_lines=10']:
+                    self.assertEqual(self.fetch('/proxy/'+path,headers={'X-Visitor':visitor,'Authorization':'Bearer spoofed-admin'}).code,200)
+                for path in ['jobsets','jobsets/'+name+'/terminate']:
+                    self.assertEqual(self.fetch('/proxy/'+path,method='POST',body='{}',headers={'X-Visitor':visitor}).code,200)
+            for path in ['jobsets/'+name+'/pods','jobsets/'+name+'/artifacts','jobsets/x%2Flogs','jobsets/../internal/v1/grants']:
+                self.assertEqual(self.fetch('/proxy/'+path,headers={'X-Visitor':'alice'}).code,404)
+        self.assertEqual([x.headers['Authorization'] for x in calls],['Bearer alice']*5+['Bearer bob']*5)
+        self.assertTrue(all(x.headers['X-CPS-Hub']=='cps' for x in calls))
+        self.assertTrue(all(x.url.startswith('https://gateway.example/v1/jobsets') for x in calls))
+
     def test_internal_and_encoded_routes_cannot_be_proxied(self):
         for path in ['internal/v1/grants','../internal/v1/grants','workflows/x%2Flogs']:
             self.assertEqual(self.fetch('/proxy/'+path,headers={'X-Visitor':'alice'}).code,404)
