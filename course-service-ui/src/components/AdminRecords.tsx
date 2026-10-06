@@ -192,6 +192,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const [sort, setSort] = useState<{key:string;ascending:boolean}|null>(null);
   const [search, setSearch] = useState(""),
     [person, setPerson] = useState(""),
     [view, setView] = useState<"profiles" | "grants">("profiles");
@@ -442,7 +443,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   }
   const filtered = records.filter((r) =>
     display(r).toLowerCase().includes(search.toLowerCase()),
-  );
+  ).sort((a,b)=>sort ? display(a[sort.key]).localeCompare(display(b[sort.key]), undefined, {numeric:true}) * (sort.ascending?1:-1) : 0);
   const columns =
     kind === "audit"
       ? ["time", "actor", "kind", "target", "outcome"]
@@ -559,8 +560,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          {search && <button className="clear-search" aria-label="Clear search" onClick={()=>setSearch("")}><X size={15}/></button>}
           <span className="record-count">
-            {filtered.length} {filtered.length === 1 ? "record" : "records"}
+            {filtered.length}{search ? ` of ${records.length}` : ""} {filtered.length === 1 ? "record" : "records"}
           </span>
           <button onClick={() => void refresh()} disabled={loading || busy}>
             <RefreshCw size={16} /> Refresh
@@ -600,7 +602,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               <thead>
                 <tr>
                   {columns.map((c) => (
-                    <th key={c}>{labels[c] ?? c.replaceAll("_", " ")}</th>
+                    <th key={c} aria-sort={sort?.key===c ? sort.ascending?"ascending":"descending":"none"}><button className="column-sort" onClick={()=>setSort({key:c,ascending:sort?.key===c?!sort.ascending:true})}>{labels[c] ?? c.replaceAll("_", " ")}<span aria-hidden="true">{sort?.key===c ? sort.ascending?"↑":"↓":"↕"}</span></button></th>
                   ))}
                   <th>
                     <span className="sr-only">Actions</span>
@@ -611,7 +613,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 {filtered.map((r, i) => (
                   <tr key={String(r.id ?? i)}>
                     {columns.map((c, j) => (
-                      <td key={c} className={j === 0 ? "record-title" : ""}>
+                      <td key={c} title={display(r[c])} className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}>
                         {[
                           "state",
                           "source",
@@ -620,14 +622,14 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                           "enabled",
                         ].includes(c) ? (
                           <span
-                            className={`status-pill ${r[c] === "failure" || r[c] === "denied" ? "bad" : ""}`}
+                            className={`status-pill ${r[c] === "failure" || r[c] === "denied" ? "bad" : r[c] === "running" || r[c] === "success" || r[c] === true ? "good" : r[c] === false || r[c] === "stopped" || r[c] === "closed" ? "muted" : ""}`}
                           >
                             {display(
-                              r[c] ?? (c === "state" ? "open" : undefined),
+                              c === "enabled" ? r[c] === true ? "Available" : r[c] === false ? "Unavailable" : undefined : r[c] ?? (c === "state" ? "open" : undefined),
                             )}
                           </span>
                         ) : (
-                          display(r[c])
+                          ["time","expires"].includes(c) && r[c] && !Number.isNaN(Date.parse(String(r[c]))) ? <time dateTime={String(r[c])}>{new Intl.DateTimeFormat("en-GB",{dateStyle:"medium",timeStyle:"short",timeZone:"UTC"}).format(new Date(String(r[c])))} UTC</time> : display(r[c])
                         )}
                       </td>
                     ))}

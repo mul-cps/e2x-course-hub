@@ -784,3 +784,23 @@ button:focus-visible {
  .topbar>a { font-size:0; gap:0; }
  .topbar>a svg { width:17px; height:17px; }
 }
+
+/* Refinement 3: scannable sortable records with stable columns. */
+.records-table { min-width:620px; }
+.records-table th,.records-table td { padding:15px 18px; }
+.records-table td { min-width:110px; }
+.records-table td.record-title { min-width:160px; }
+.records-table tbody tr:hover { background:#f9fbff; }
+.records-table thead th { color:#586d87; }
+.admin-page .column-sort { padding:0; border:0; background:transparent; color:inherit; font-size:11px; justify-content:space-between; width:100%; text-transform:capitalize; }
+.admin-page .column-sort:hover { background:transparent; color:#1565d8; }
+.column-sort span { margin-left:12px; color:#6b87aa; }
+.record-id { font-family:ui-monospace,SFMono-Regular,monospace; font-size:11px !important; }
+.status-pill.good { background:#eaf7f0; color:#286448; }
+.status-pill.muted { background:#f0f3f7; color:#57667a; }
+.status-pill.bad { color:#a03541; }
+.records-table time { white-space:nowrap; }
+.table-scroll { scrollbar-width:thin; scrollbar-color:#bfcddd #f5f7fb; }
+.table-scroll:focus-visible { outline:2px solid #93baff; outline-offset:-2px; }
+.admin-page .clear-search { padding:6px; border:0; background:#f3f6fa; }
+@media(max-width:760px) { .records-table .row-actions { justify-content:flex-start; } }
