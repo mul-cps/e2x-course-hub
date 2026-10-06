@@ -104,7 +104,7 @@ test.beforeEach(async ({ page }) => {
                     profiles: {
                       cpu: {
                         name: "CPU",
-                  kind: "interactive",
+                        kind: "interactive",
                         cpu: "2",
                         memory: "4Gi",
                         enabled: true,
@@ -190,8 +190,7 @@ test("compute profiles are readable and grant lookup reads grants", async ({
 }) => {
   await page.goto("/compute");
   await expect(
-    page.getByRole("cell", { name: "CPU",
-                  kind: "interactive", exact: true }),
+    page.getByRole("cell", { name: "CPU", kind: "interactive", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Use for grant" })).toHaveCount(
     0,
@@ -391,15 +390,162 @@ test("external records expose no edit or remove controls", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test('course tabs persist across refresh and mobile menu exposes all navigation',async({page})=>{
- await page.goto('/courses');await page.getByRole('button',{name:'Members',exact:true}).click();await expect(page).toHaveURL(/tab=memberships/);await page.reload();await expect(page.getByRole('heading',{name:'Members',exact:true})).toBeVisible();
- await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Open navigation'}).click();await expect(page.getByRole('navigation').getByRole('link',{name:'Integrations',exact:true})).toBeVisible();await page.getByRole('navigation').getByRole('link',{name:'Projects',exact:true}).click();await expect(page.getByRole('heading',{name:'Projects',exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'Open navigation'})).toHaveAttribute('aria-expanded','false');await page.screenshot({path:'/tmp/cps-admin-ui-qa/navigation-mobile.png',fullPage:true});
+test("course tabs persist across refresh and mobile menu exposes all navigation", async ({
+  page,
+}) => {
+  await page.goto("/courses");
+  await page.getByRole("button", { name: "Members", exact: true }).click();
+  await expect(page).toHaveURL(/tab=memberships/);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Members", exact: true }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await expect(
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "Integrations", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Projects", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Projects", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open navigation" }),
+  ).toHaveAttribute("aria-expanded", "false");
+  await page.screenshot({
+    path: "/tmp/cps-admin-ui-qa/navigation-mobile.png",
+    fullPage: true,
+  });
 });
 
-test('records sort, search and clear without altering records',async({page})=>{
- await page.route('**/api/local/courses',route=>route.fulfill({json:{records:[{id:'z',name:'Zoology',source:'local'},{id:'a',name:'Algebra',source:'local'}]}}));await page.goto('/courses');await page.getByRole('button',{name:/^name$/i}).click();await expect(page.locator('tbody tr').first()).toContainText('Algebra');await expect(page.getByRole('columnheader',{name:/^name$/i})).toHaveAttribute('aria-sort','ascending');await page.getByRole('button',{name:/^name$/i}).click();await expect(page.locator('tbody tr').first()).toContainText('Zoology');await page.getByRole('textbox',{name:'Search Courses'}).fill('Algebra');await expect(page.locator('tbody tr')).toHaveCount(1);await page.getByRole('button',{name:'Clear search'}).click();await expect(page.locator('tbody tr')).toHaveCount(2);expect(writes).toHaveLength(0);await page.screenshot({path:'/tmp/cps-admin-ui-qa/tables-desktop.png',fullPage:true});
+test("records sort, search and clear without altering records", async ({
+  page,
+}) => {
+  await page.route("**/api/local/courses", (route) =>
+    route.fulfill({
+      json: {
+        records: [
+          { id: "z", name: "Zoology", source: "local" },
+          { id: "a", name: "Algebra", source: "local" },
+        ],
+      },
+    }),
+  );
+  await page.goto("/courses");
+  await page.getByRole("button", { name: /^name$/i }).click();
+  await expect(page.locator("tbody tr").first()).toContainText("Algebra");
+  await expect(
+    page.getByRole("columnheader", { name: /^name$/i }),
+  ).toHaveAttribute("aria-sort", "ascending");
+  await page.getByRole("button", { name: /^name$/i }).click();
+  await expect(page.locator("tbody tr").first()).toContainText("Zoology");
+  await page.getByRole("textbox", { name: "Search Courses" }).fill("Algebra");
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect(page.locator("tbody tr")).toHaveCount(2);
+  expect(writes).toHaveLength(0);
+  await page.screenshot({
+    path: "/tmp/cps-admin-ui-qa/tables-desktop.png",
+    fullPage: true,
+  });
 });
 
-test('workspace picker excludes batch and disabled profiles and explains CPU-only availability',async({page})=>{
- await page.route('**/api/compute',route=>route.fulfill({json:{profiles:{'interactive-cpu':{kind:'interactive',gpu:{mode:'none'},enabled:true},'batch-cpu':{kind:'batch',enabled:true},'interactive-shared-5':{kind:'interactive',gpu:{mode:'shared'},enabled:false}}}}));await page.goto('/workspaces');await page.getByRole('button',{name:'Create workspace',exact:true}).click();await expect(page.getByText('Only CPU profiles are currently available. GPU profiles are disabled by shared policy.')).toBeVisible();const picker=page.getByLabel('Compute profile',{exact:true});await expect(picker.locator('option')).toHaveText(['Select compute profile','interactive-cpu']);await page.screenshot({path:'/tmp/cps-admin-ui-qa/workspace-editor.png',fullPage:true});
+test("workspace picker excludes batch and disabled profiles and explains CPU-only availability", async ({
+  page,
+}) => {
+  await page.route("**/api/compute", (route) =>
+    route.fulfill({
+      json: {
+        profiles: {
+          "interactive-cpu": {
+            kind: "interactive",
+            gpu: { mode: "none" },
+            enabled: true,
+          },
+          "batch-cpu": { kind: "batch", enabled: true },
+          "interactive-shared-5": {
+            kind: "interactive",
+            gpu: { mode: "shared" },
+            enabled: false,
+          },
+        },
+      },
+    }),
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Create workspace", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Only CPU profiles are currently available. GPU profiles are disabled by shared policy.",
+    ),
+  ).toBeVisible();
+  const picker = page.getByLabel("Compute profile", { exact: true });
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "interactive-cpu",
+  ]);
+  await page.screenshot({
+    path: "/tmp/cps-admin-ui-qa/workspace-editor.png",
+    fullPage: true,
+  });
+});
+
+test("mobile dialog stays in viewport and background is inert until close", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  await page.goto("/courses");
+  await page
+    .getByRole("button", { name: "Create course", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  expect(
+    await page
+      .locator(".admin-sidebar")
+      .evaluate((el) => (el as HTMLElement).inert),
+  ).toBeTruthy();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBeTruthy();
+  await page.getByLabel("Identifier", { exact: false }).fill("mobile");
+  await page.getByLabel(/^Name/).fill("Mobile course");
+  await page.screenshot({
+    path: "/tmp/cps-admin-ui-qa/editor-mobile.png",
+    fullPage: true,
+  });
+  await page.keyboard.press("Escape");
+  expect(
+    await page
+      .locator(".admin-sidebar")
+      .evaluate((el) => (el as HTMLElement).inert),
+  ).toBeFalsy();
+  await expect(
+    page.getByRole("button", { name: "Create course", exact: true }),
+  ).toBeFocused();
+});
+test("keyboard skip link and navigation announce destination", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.keyboard.press("Tab");
+  await expect(
+    page.getByRole("link", { name: "Skip to content" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+  await page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Projects", exact: true })
+    .click();
+  await expect(page).toHaveTitle("Projects · Compute Platform");
+  await expect(page.locator("#main-content")).toBeFocused();
 });

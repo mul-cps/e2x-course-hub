@@ -193,7 +193,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
-  const [sort, setSort] = useState<{key:string;ascending:boolean}|null>(null);
+  const [sort, setSort] = useState<{ key: string; ascending: boolean } | null>(
+    null,
+  );
   const [search, setSearch] = useState(""),
     [person, setPerson] = useState(""),
     [view, setView] = useState<"profiles" | "grants">("profiles");
@@ -212,6 +214,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     if (!dialogOpen) return;
     const previous = document.activeElement as HTMLElement | null;
     const dialog = dialogRef.current;
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const background: [HTMLElement, boolean][] = [];
+    let branch = dialog?.parentElement;
+    while (branch && branch !== document.body) {
+      for (const sibling of Array.from(branch.parentElement?.children ?? [])) {
+        if (sibling !== branch && sibling instanceof HTMLElement) {
+          background.push([sibling, sibling.inert]);
+          sibling.inert = true;
+        }
+      }
+      branch = branch.parentElement;
+    }
     const focusable = () =>
       Array.from(
         dialog?.querySelectorAll<HTMLElement>(
@@ -241,6 +256,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     document.addEventListener("keydown", key);
     return () => {
       document.removeEventListener("keydown", key);
+      for (const [element, inert] of background) element.inert = inert;
+      document.body.style.overflow = originalOverflow;
       previous?.focus();
     };
   }, [dialogOpen, busy]);
@@ -355,8 +372,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     setAllocation("");
     setError("");
   }
-  const workspaceProfiles = (refs.profiles ?? []).filter(p => p.enabled !== false && (p.kind === "interactive" || (p.kind == null && String(p.id).startsWith("interactive-"))));
-  const cpuOnly = workspaceProfiles.length > 0 && workspaceProfiles.every(p => String(p.id).includes("cpu") || (p.gpu as Row|undefined)?.mode === "none");
+  const workspaceProfiles = (refs.profiles ?? []).filter(
+    (p) =>
+      p.enabled !== false &&
+      (p.kind === "interactive" ||
+        (p.kind == null && String(p.id).startsWith("interactive-"))),
+  );
+  const cpuOnly =
+    workspaceProfiles.length > 0 &&
+    workspaceProfiles.every(
+      (p) =>
+        String(p.id).includes("cpu") ||
+        (p.gpu as Row | undefined)?.mode === "none",
+    );
   async function save() {
     if (!draft) return;
     try {
@@ -396,9 +424,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           delete payload.seed;
         }
       }
-      if(payload.starts && payload.expires && Date.parse(String(payload.starts)) >= Date.parse(String(payload.expires))) throw new Error("Expiry must be after the start date.");
+      if (
+        payload.starts &&
+        payload.expires &&
+        Date.parse(String(payload.starts)) >=
+          Date.parse(String(payload.expires))
+      )
+        throw new Error("Expiry must be after the start date.");
       if (kind === "workspaces") {
-        if(!workspaceProfiles.some(p=>p.id===draft.profile)) throw new Error("Select an available interactive profile.");
+        if (!workspaceProfiles.some((p) => p.id === draft.profile))
+          throw new Error("Select an available interactive profile.");
         const selected = refs.courses?.find((r) => r.id === draft.course_id);
         const bindings = Array.isArray(selected?.workspace_bindings)
           ? (selected.workspace_bindings as Row[])
@@ -446,9 +481,15 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   function ask(message: string, run: () => Promise<void>) {
     setConfirmation({ message, run });
   }
-  const filtered = records.filter((r) =>
-    display(r).toLowerCase().includes(search.toLowerCase()),
-  ).sort((a,b)=>sort ? display(a[sort.key]).localeCompare(display(b[sort.key]), undefined, {numeric:true}) * (sort.ascending?1:-1) : 0);
+  const filtered = records
+    .filter((r) => display(r).toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) =>
+      sort
+        ? display(a[sort.key]).localeCompare(display(b[sort.key]), undefined, {
+            numeric: true,
+          }) * (sort.ascending ? 1 : -1)
+        : 0,
+    );
   const columns =
     kind === "audit"
       ? ["time", "actor", "kind", "target", "outcome"]
@@ -565,9 +606,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          {search && <button className="clear-search" aria-label="Clear search" onClick={()=>setSearch("")}><X size={15}/></button>}
+          {search && (
+            <button
+              className="clear-search"
+              aria-label="Clear search"
+              onClick={() => setSearch("")}
+            >
+              <X size={15} />
+            </button>
+          )}
           <span className="record-count">
-            {filtered.length}{search ? ` of ${records.length}` : ""} {filtered.length === 1 ? "record" : "records"}
+            {filtered.length}
+            {search ? ` of ${records.length}` : ""}{" "}
+            {filtered.length === 1 ? "record" : "records"}
           </span>
           <button onClick={() => void refresh()} disabled={loading || busy}>
             <RefreshCw size={16} /> Refresh
@@ -602,12 +653,41 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
             )}
           </div>
         ) : (
-          <div className="table-scroll">
+          <div
+            className="table-scroll"
+            role="region"
+            aria-label={`${titles[kind]} records`}
+            tabIndex={0}
+          >
             <table className="records-table">
               <thead>
                 <tr>
                   {columns.map((c) => (
-                    <th key={c} aria-sort={sort?.key===c ? sort.ascending?"ascending":"descending":"none"}><button className="column-sort" onClick={()=>setSort({key:c,ascending:sort?.key===c?!sort.ascending:true})}>{labels[c] ?? c.replaceAll("_", " ")}<span aria-hidden="true">{sort?.key===c ? sort.ascending?"↑":"↓":"↕"}</span></button></th>
+                    <th
+                      key={c}
+                      aria-sort={
+                        sort?.key === c
+                          ? sort.ascending
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                      }
+                    >
+                      <button
+                        className="column-sort"
+                        onClick={() =>
+                          setSort({
+                            key: c,
+                            ascending: sort?.key === c ? !sort.ascending : true,
+                          })
+                        }
+                      >
+                        {labels[c] ?? c.replaceAll("_", " ")}
+                        <span aria-hidden="true">
+                          {sort?.key === c ? (sort.ascending ? "↑" : "↓") : "↕"}
+                        </span>
+                      </button>
+                    </th>
                   ))}
                   <th>
                     <span className="sr-only">Actions</span>
@@ -618,7 +698,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 {filtered.map((r, i) => (
                   <tr key={String(r.id ?? i)}>
                     {columns.map((c, j) => (
-                      <td key={c} title={display(r[c])} className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}>
+                      <td
+                        key={c}
+                        title={display(r[c])}
+                        className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
+                      >
                         {[
                           "state",
                           "source",
@@ -630,11 +714,29 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                             className={`status-pill ${r[c] === "failure" || r[c] === "denied" ? "bad" : r[c] === "running" || r[c] === "success" || r[c] === true ? "good" : r[c] === false || r[c] === "stopped" || r[c] === "closed" ? "muted" : ""}`}
                           >
                             {display(
-                              c === "enabled" ? r[c] === true ? "Available" : r[c] === false ? "Unavailable" : undefined : r[c] ?? (c === "state" ? "open" : undefined),
+                              c === "enabled"
+                                ? r[c] === true
+                                  ? "Available"
+                                  : r[c] === false
+                                    ? "Unavailable"
+                                    : undefined
+                                : (r[c] ??
+                                    (c === "state" ? "open" : undefined)),
                             )}
                           </span>
+                        ) : ["time", "expires"].includes(c) &&
+                          r[c] &&
+                          !Number.isNaN(Date.parse(String(r[c]))) ? (
+                          <time dateTime={String(r[c])}>
+                            {new Intl.DateTimeFormat("en-GB", {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                              timeZone: "UTC",
+                            }).format(new Date(String(r[c])))}{" "}
+                            UTC
+                          </time>
                         ) : (
-                          ["time","expires"].includes(c) && r[c] && !Number.isNaN(Date.parse(String(r[c]))) ? <time dateTime={String(r[c])}>{new Intl.DateTimeFormat("en-GB",{dateStyle:"medium",timeStyle:"short",timeZone:"UTC"}).format(new Date(String(r[c])))} UTC</time> : display(r[c])
+                          display(r[c])
                         )}
                       </td>
                     ))}
@@ -781,8 +883,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 void save();
               }}
             >
-              <p className="form-intro">Fields marked * are required. Changes are checked against your permissions and recorded in the audit log.</p>
-                <div className="form-grid">
+              <p className="form-intro">
+                Fields marked * are required. Changes are checked against your
+                permissions and recorded in the audit log.
+              </p>
+              <div className="form-grid">
                 {fields[kind]
                   .filter(
                     (f) =>
@@ -791,7 +896,10 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       !["seed", "group_size"].includes(f.key),
                   )
                   .map((f) => {
-                    let options = f.reference === "profiles" && kind === "workspaces" ? workspaceProfiles : refs[f.reference ?? ""] ?? [];
+                    let options =
+                      f.reference === "profiles" && kind === "workspaces"
+                        ? workspaceProfiles
+                        : (refs[f.reference ?? ""] ?? []);
                     if (
                       f.reference === "terms" ||
                       f.reference === "groups" ||
@@ -847,7 +955,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                               <option key={o}>{o}</option>
                             ))}
                           </select>
-                        ) : f.reference && (options.length > 0 || f.reference === "profiles") ? (
+                        ) : f.reference &&
+                          (options.length > 0 || f.reference === "profiles") ? (
                           <select
                             aria-label={f.label}
                             multiple={f.type === "list"}
@@ -957,8 +1066,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   </label>
                 )}
               </div>
-              {kind === "workspaces" && cpuOnly && <p className="availability-note"><Cpu size={17}/>Only CPU profiles are currently available. GPU profiles are disabled by shared policy.</p>}
-              {kind === "workspaces" && workspaceProfiles.length === 0 && <p className="availability-note">No eligible interactive profiles are available. Check compute access before creating a workspace.</p>}
+              {kind === "workspaces" && cpuOnly && (
+                <p className="availability-note">
+                  <Cpu size={17} />
+                  Only CPU profiles are currently available. GPU profiles are
+                  disabled by shared policy.
+                </p>
+              )}
+              {kind === "workspaces" && workspaceProfiles.length === 0 && (
+                <p className="availability-note">
+                  No eligible interactive profiles are available. Check compute
+                  access before creating a workspace.
+                </p>
+              )}
               {kind === "workspaces" && (
                 <p className="info-note">
                   The neutral account and resource ceiling come from approved

@@ -1,4 +1,12 @@
-import { Routes, Route, NavLink, Link, Navigate, useLocation, useSearchParams } from "react-router-dom";
+import {
+  Routes,
+  Route,
+  NavLink,
+  Link,
+  Navigate,
+  useLocation,
+  useSearchParams,
+} from "react-router-dom";
 import {
   LayoutDashboard,
   GraduationCap,
@@ -19,7 +27,7 @@ import AdminRecords from "./components/AdminRecords";
 import CoursesTable from "./components/CoursesTable";
 import CourseDetailPage from "./components/CourseDetailPage";
 import ProfileDetailsPage from "./components/ProfileDetailsPage";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 const navigation = [
   { path: "/", label: "Overview", icon: LayoutDashboard },
   { path: "/courses", label: "Courses", icon: GraduationCap },
@@ -45,7 +53,10 @@ function Overview() {
           Manage courses <ChevronRight size={16} />
         </Link>
       </div>
-      <div className="section-heading"><h2>Quick access</h2><span>Teaching, research and collaboration</span></div>
+      <div className="section-heading">
+        <h2>Quick access</h2>
+        <span>Teaching, research and collaboration</span>
+      </div>
       <div className="overview-grid">
         {navigation.slice(1, 7).map(({ path, label, icon: Icon }) => (
           <Link className="overview-card" key={path} to={path}>
@@ -93,7 +104,8 @@ function Overview() {
           <div>
             <h2>Local course management is active</h2>
             <p>
-              Manage courses locally. Moodle integration is planned and remains disabled.
+              Manage courses locally. Moodle integration is planned and remains
+              disabled.
             </p>
             <Link to="/integrations">View integrations →</Link>
           </div>
@@ -104,9 +116,19 @@ function Overview() {
 }
 function Courses() {
   const [params, setParams] = useSearchParams();
-  const allowedTabs = ["courses", "terms", "memberships", "groups", "groupings", "servers"];
-  const tab = allowedTabs.includes(params.get("tab") ?? "") ? params.get("tab")! : "courses";
-  const setTab = (next: string) => setParams(next === "courses" ? {} : {tab: next});
+  const allowedTabs = [
+    "courses",
+    "terms",
+    "memberships",
+    "groups",
+    "groupings",
+    "servers",
+  ];
+  const tab = allowedTabs.includes(params.get("tab") ?? "")
+    ? params.get("tab")!
+    : "courses";
+  const setTab = (next: string) =>
+    setParams(next === "courses" ? {} : { tab: next });
   return (
     <>
       <div className="section-tabs" aria-label="Course views">
@@ -162,119 +184,166 @@ function Courses() {
 function App() {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
-  const current = navigation.find(item => item.path === location.pathname)?.label ?? (location.pathname.startsWith("/course/") ? "Course details" : "Administration");
+  const current =
+    navigation.find((item) => item.path === location.pathname)?.label ??
+    (location.pathname.startsWith("/course/")
+      ? "Course details"
+      : "Administration");
+  const previousPath = useRef(location.pathname);
+  useEffect(() => {
+    document.title = `${current} · Compute Platform`;
+    if (previousPath.current !== location.pathname) {
+      document.getElementById("main-content")?.focus();
+      window.scrollTo(0, 0);
+      previousPath.current = location.pathname;
+    }
+  }, [current, location.pathname]);
   return (
-    <div className="admin-shell">
-      <aside className={`admin-sidebar ${menuOpen ? "menu-open" : ""}`}>
-        <Link to="/" className="brand">
-          <div className="brand-mark">
-            <Cpu size={23} />
-          </div>
-          <div>
-            Compute Platform<span>Administration</span>
-          </div>
-        </Link>
-        <button className="mobile-menu-toggle" aria-label={menuOpen ? "Close navigation" : "Open navigation"} aria-expanded={menuOpen} aria-controls="admin-navigation" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={20}/> : <Menu size={20}/>}</button>
-        <p className="nav-label">WORKSPACE</p>
-        <nav id="admin-navigation" aria-label="Administration">
-          {navigation.map(({ path, label, icon: Icon }) => (
-            <NavLink end={path === "/"} key={path} to={path} onClick={() => setMenuOpen(false)} className={({isActive}) => isActive || (path === "/courses" && location.pathname.startsWith("/course/")) ? "active" : ""}>
-              <Icon size={18} />
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="sidebar-note">
-          <ShieldCheck size={17} />
-          <span>Course permissions and shared compute policy</span>
-        </div>
-        <div className="account-card">
-          <span className="avatar">
-            {config.user.name.slice(0, 2).toUpperCase()}
-          </span>
-          <div>
-            <strong>{config.user.name}</strong>
-            <span>{config.user.admin ? "Administrator" : "Course member"}</span>
-          </div>
-        </div>
-      </aside>
-      <div className="admin-body">
-        <header className="topbar">
-          <span>
-            <Link to="/">Administration</Link> <ChevronRight size={14} /> <strong>{current}</strong>
-          </span>
-          <a href={`${config.baseUrl.split("/services/")[0]}/hub/home`}>
-            Back to JupyterHub <ArrowUpRight size={14} />
-          </a>
-        </header>
-        <main id="main-content">
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/courses" element={<Courses />} />
-            <Route path="/local" element={<Navigate to="/courses" replace />} />
-            {(
-              [
-                "projects",
-                "compute",
-                "workspaces",
-                "assignments",
-                "audit",
-              ] as const
-            ).map((kind) => (
-              <Route
-                key={kind}
-                path={`/${kind}`}
-                element={<AdminRecords key={kind} kind={kind} />}
-              />
+    <>
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
+      <div className="admin-shell">
+        <aside className={`admin-sidebar ${menuOpen ? "menu-open" : ""}`}>
+          <Link to="/" className="brand">
+            <div className="brand-mark">
+              <Cpu size={23} />
+            </div>
+            <div>
+              Compute Platform<span>Administration</span>
+            </div>
+          </Link>
+          <button
+            className="mobile-menu-toggle"
+            aria-label={menuOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={menuOpen}
+            aria-controls="admin-navigation"
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            {menuOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
+          <p className="nav-label">WORKSPACE</p>
+          <nav id="admin-navigation" aria-label="Administration">
+            {navigation.map(({ path, label, icon: Icon }) => (
+              <NavLink
+                end={path === "/"}
+                key={path}
+                to={path}
+                onClick={() => setMenuOpen(false)}
+                className={({ isActive }) =>
+                  isActive ||
+                  (path === "/courses" &&
+                    location.pathname.startsWith("/course/"))
+                    ? "active"
+                    : ""
+                }
+              >
+                <Icon size={18} />
+                {label}
+              </NavLink>
             ))}
-            <Route
-              path="/integrations"
-              element={
-                <section className="admin-page">
-                  <div className="page-heading">
-                    <div>
-                      <p className="eyebrow">Connections</p>
-                      <h1>Integrations</h1>
-                      <p>External integrations and their availability.</p>
+          </nav>
+          <div className="sidebar-note">
+            <ShieldCheck size={17} />
+            <span>Course permissions and shared compute policy</span>
+          </div>
+          <div className="account-card">
+            <span className="avatar">
+              {config.user.name.slice(0, 2).toUpperCase()}
+            </span>
+            <div>
+              <strong>{config.user.name}</strong>
+              <span>
+                {config.user.admin ? "Administrator" : "Course member"}
+              </span>
+            </div>
+          </div>
+        </aside>
+        <div className="admin-body">
+          <header className="topbar">
+            <span>
+              <Link to="/">Administration</Link> <ChevronRight size={14} />{" "}
+              <strong>{current}</strong>
+            </span>
+            <a
+              aria-label="Back to JupyterHub"
+              href={`${config.baseUrl.split("/services/")[0]}/hub/home`}
+            >
+              Back to JupyterHub <ArrowUpRight size={14} />
+            </a>
+          </header>
+          <main id="main-content" tabIndex={-1}>
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/courses" element={<Courses />} />
+              <Route
+                path="/local"
+                element={<Navigate to="/courses" replace />}
+              />
+              {(
+                [
+                  "projects",
+                  "compute",
+                  "workspaces",
+                  "assignments",
+                  "audit",
+                ] as const
+              ).map((kind) => (
+                <Route
+                  key={kind}
+                  path={`/${kind}`}
+                  element={<AdminRecords key={kind} kind={kind} />}
+                />
+              ))}
+              <Route
+                path="/integrations"
+                element={
+                  <section className="admin-page">
+                    <div className="page-heading">
+                      <div>
+                        <p className="eyebrow">Connections</p>
+                        <h1>Integrations</h1>
+                        <p>External integrations and their availability.</p>
+                      </div>
                     </div>
-                  </div>
-                  <div className="integration-card">
-                    <div className="card-icon">
-                      <GraduationCap size={24} />
+                    <div className="integration-card">
+                      <div className="card-icon">
+                        <GraduationCap size={24} />
+                      </div>
+                      <div>
+                        <h2>Moodle</h2>
+                        <span className="status-pill">
+                          Planned / Not configured
+                        </span>
+                        <p>
+                          Local course management is active. Moodle integration
+                          is planned and is not deployed.
+                        </p>
+                        <a
+                          href="https://github.com/mul-cps/e2x-course-hub/blob/feat/cps-platform-v1/docs/cps-platform.md"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Read integration documentation ↗
+                        </a>
+                      </div>
                     </div>
-                    <div>
-                      <h2>Moodle</h2>
-                      <span className="status-pill">
-                        Planned / Not configured
-                      </span>
-                      <p>
-                        Local course management is active. Moodle integration is
-                        planned and is not deployed.
-                      </p>
-                      <a
-                        href="https://github.com/mul-cps/e2x-course-hub/blob/feat/cps-platform-v1/docs/cps-platform.md"
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Read integration documentation ↗
-                      </a>
-                    </div>
-                  </div>
-                </section>
-              }
-            />
-            <Route
-              path="/course/:courseId/:termId"
-              element={<CourseDetailPage />}
-            />
-            <Route
-              path="/course/:courseId/:termId/profiles"
-              element={<ProfileDetailsPage />}
-            />
-          </Routes>
-        </main>
+                  </section>
+                }
+              />
+              <Route
+                path="/course/:courseId/:termId"
+                element={<CourseDetailPage />}
+              />
+              <Route
+                path="/course/:courseId/:termId/profiles"
+                element={<ProfileDetailsPage />}
+              />
+            </Routes>
+          </main>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 export default App;
