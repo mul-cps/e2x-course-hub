@@ -1,0 +1,12 @@
+# Frontend-only qualification update. Preserve the currently deployed backend.
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS frontend
+WORKDIR /src/course-service-ui
+COPY course-service-ui/package*.json ./
+RUN npm ci
+COPY course-service-ui/ ./
+RUN npm run build
+
+FROM ghcr.io/mul-cps/e2x-course-hub:qualification-fa48334@sha256:89bd173142eb17d898efc78c46438ab474a88a3f3f700996901743f4d7b4eb7e
+ARG VCS_REF
+LABEL org.opencontainers.image.revision=$VCS_REF
+COPY --from=frontend /src/share/e2x_course_hub/static/course-service-ui/ /usr/local/share/e2x_course_hub/static/course-service-ui/
