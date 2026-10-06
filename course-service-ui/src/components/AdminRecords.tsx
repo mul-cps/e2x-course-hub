@@ -9,6 +9,7 @@ import {
   AlertCircle,
   CheckCircle2,
   FolderOpen,
+  Cpu,
 } from "lucide-react";
 import { requests } from "../api/client";
 import { config } from "../config";
@@ -354,6 +355,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     setAllocation("");
     setError("");
   }
+  const workspaceProfiles = (refs.profiles ?? []).filter(p => p.enabled !== false && (p.kind === "interactive" || (p.kind == null && String(p.id).startsWith("interactive-"))));
+  const cpuOnly = workspaceProfiles.length > 0 && workspaceProfiles.every(p => String(p.id).includes("cpu") || (p.gpu as Row|undefined)?.mode === "none");
   async function save() {
     if (!draft) return;
     try {
@@ -393,7 +396,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           delete payload.seed;
         }
       }
+      if(payload.starts && payload.expires && Date.parse(String(payload.starts)) >= Date.parse(String(payload.expires))) throw new Error("Expiry must be after the start date.");
       if (kind === "workspaces") {
+        if(!workspaceProfiles.some(p=>p.id===draft.profile)) throw new Error("Select an available interactive profile.");
         const selected = refs.courses?.find((r) => r.id === draft.course_id);
         const bindings = Array.isArray(selected?.workspace_bindings)
           ? (selected.workspace_bindings as Row[])
@@ -776,7 +781,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 void save();
               }}
             >
-              <div className="form-grid">
+              <p className="form-intro">Fields marked * are required. Changes are checked against your permissions and recorded in the audit log.</p>
+                <div className="form-grid">
                 {fields[kind]
                   .filter(
                     (f) =>
@@ -785,7 +791,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       !["seed", "group_size"].includes(f.key),
                   )
                   .map((f) => {
-                    let options = refs[f.reference ?? ""] ?? [];
+                    let options = f.reference === "profiles" && kind === "workspaces" ? workspaceProfiles : refs[f.reference ?? ""] ?? [];
                     if (
                       f.reference === "terms" ||
                       f.reference === "groups" ||
@@ -833,6 +839,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                           />
                         ) : f.options ? (
                           <select
+                            aria-label={f.label}
                             value={String(value)}
                             onChange={(e) => change(e.target.value)}
                           >
@@ -840,8 +847,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                               <option key={o}>{o}</option>
                             ))}
                           </select>
-                        ) : f.reference && options.length > 0 ? (
+                        ) : f.reference && (options.length > 0 || f.reference === "profiles") ? (
                           <select
+                            aria-label={f.label}
                             multiple={f.type === "list"}
                             required={f.required}
                             disabled={locked}
@@ -949,6 +957,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   </label>
                 )}
               </div>
+              {kind === "workspaces" && cpuOnly && <p className="availability-note"><Cpu size={17}/>Only CPU profiles are currently available. GPU profiles are disabled by shared policy.</p>}
+              {kind === "workspaces" && workspaceProfiles.length === 0 && <p className="availability-note">No eligible interactive profiles are available. Check compute access before creating a workspace.</p>}
               {kind === "workspaces" && (
                 <p className="info-note">
                   The neutral account and resource ceiling come from approved

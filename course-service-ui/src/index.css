@@ -804,3 +804,14 @@ button:focus-visible {
 .table-scroll:focus-visible { outline:2px solid #93baff; outline-offset:-2px; }
 .admin-page .clear-search { padding:6px; border:0; background:#f3f6fa; }
 @media(max-width:760px) { .records-table .row-actions { justify-content:flex-start; } }
+
+/* Refinement 4: form guidance and visible policy availability. */
+.form-intro { color:#63758c; font-size:12px; line-height:1.7; margin:-8px 0 22px; }
+.form-grid { gap:22px 20px; }
+.form-grid label { color:#3d5573; }
+.admin-page input,.admin-page select,.admin-page textarea { border-color:#ccd9e9; min-height:42px; }
+.admin-page input:focus,.admin-page textarea:focus,.admin-page select:focus { outline:2px solid #77a6f4; outline-offset:2px; border-color:#77a6f4; }
+.availability-note { display:flex; align-items:flex-start; gap:9px; background:#fff7e8; border:1px solid #f0dfbb; color:#805d20; border-radius:8px; padding:12px 14px; font-size:12px; line-height:1.7; margin-top:20px; }
+.availability-note svg { flex-shrink:0; margin-top:3px; }
+.editor-dialog { padding:30px; }
+.dialog-footer { position:sticky; bottom:-30px; background:white; padding-bottom:12px; }

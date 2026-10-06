@@ -104,6 +104,7 @@ test.beforeEach(async ({ page }) => {
                     profiles: {
                       cpu: {
                         name: "CPU",
+                  kind: "interactive",
                         cpu: "2",
                         memory: "4Gi",
                         enabled: true,
@@ -189,7 +190,8 @@ test("compute profiles are readable and grant lookup reads grants", async ({
 }) => {
   await page.goto("/compute");
   await expect(
-    page.getByRole("cell", { name: "CPU", exact: true }),
+    page.getByRole("cell", { name: "CPU",
+                  kind: "interactive", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Use for grant" })).toHaveCount(
     0,
@@ -396,4 +398,8 @@ test('course tabs persist across refresh and mobile menu exposes all navigation'
 
 test('records sort, search and clear without altering records',async({page})=>{
  await page.route('**/api/local/courses',route=>route.fulfill({json:{records:[{id:'z',name:'Zoology',source:'local'},{id:'a',name:'Algebra',source:'local'}]}}));await page.goto('/courses');await page.getByRole('button',{name:/^name$/i}).click();await expect(page.locator('tbody tr').first()).toContainText('Algebra');await expect(page.getByRole('columnheader',{name:/^name$/i})).toHaveAttribute('aria-sort','ascending');await page.getByRole('button',{name:/^name$/i}).click();await expect(page.locator('tbody tr').first()).toContainText('Zoology');await page.getByRole('textbox',{name:'Search Courses'}).fill('Algebra');await expect(page.locator('tbody tr')).toHaveCount(1);await page.getByRole('button',{name:'Clear search'}).click();await expect(page.locator('tbody tr')).toHaveCount(2);expect(writes).toHaveLength(0);await page.screenshot({path:'/tmp/cps-admin-ui-qa/tables-desktop.png',fullPage:true});
+});
+
+test('workspace picker excludes batch and disabled profiles and explains CPU-only availability',async({page})=>{
+ await page.route('**/api/compute',route=>route.fulfill({json:{profiles:{'interactive-cpu':{kind:'interactive',gpu:{mode:'none'},enabled:true},'batch-cpu':{kind:'batch',enabled:true},'interactive-shared-5':{kind:'interactive',gpu:{mode:'shared'},enabled:false}}}}));await page.goto('/workspaces');await page.getByRole('button',{name:'Create workspace',exact:true}).click();await expect(page.getByText('Only CPU profiles are currently available. GPU profiles are disabled by shared policy.')).toBeVisible();const picker=page.getByLabel('Compute profile',{exact:true});await expect(picker.locator('option')).toHaveText(['Select compute profile','interactive-cpu']);await page.screenshot({path:'/tmp/cps-admin-ui-qa/workspace-editor.png',fullPage:true});
 });
