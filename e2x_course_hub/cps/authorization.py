@@ -16,15 +16,20 @@ ROLE_PERMISSIONS[Role.COURSE_OWNER]=frozenset(Permission)
 ROLE_PERMISSIONS[Role.INSTRUCTOR]=frozenset(Permission)
 ROLE_PERMISSIONS[Role.TEACHING_ASSISTANT]=frozenset({Permission.VIEW_COURSE,Permission.VIEW_TERM})
 
-def checker(username,groups,legacy_roles=None):
-    translated=list(groups)
+def canonical_group(group,legacy_roles=None):
     # Interpret configured legacy aliases without renaming any existing Hub group or path.
     aliases=legacy_roles or {'instructor':'instructor'}
     known={r.role_name:r for r in Role}
+    parts=group.split('.')
+    if len(parts)==3 and parts[2] in aliases:
+        role=known.get(aliases[parts[2]])
+        if role and role.scope is Scope.TERM:
+            return RoleAssignment.term(role,parts[0],parts[1]).group_name
+    return group
+
+def checker(username,groups,legacy_roles=None):
+    translated=list(groups)
     for group in groups:
-        parts=group.split('.')
-        if len(parts)==3 and parts[2] in aliases:
-            role=known.get(aliases[parts[2]])
-            if role and role.scope is Scope.TERM:
-                translated.append(RoleAssignment.term(role,parts[0],parts[1]).group_name)
+        canonical=canonical_group(group,legacy_roles)
+        if canonical != group:translated.append(canonical)
     return PermissionChecker(SimpleNamespace(username=username,groups=translated),ROLE_PERMISSIONS)

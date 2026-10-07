@@ -14,12 +14,15 @@ def active(record,now=None):
     start,end=instant(record.get('starts')),instant(record.get('expires'))
     return (start is None or start<=now) and (end is None or now<end)
 
-def effective_groups(provider,username,groups):
+def effective_groups(provider,username,groups,legacy_roles=None):
     import json
+    from .authorization import canonical_group
     records=[json.loads(r['payload']) for r in provider.db.execute(
         "SELECT payload FROM records WHERE console=? AND kind='memberships'",(provider.console,))]
     result=[]
     for group in groups:
-        grants=[r for r in records if r['person_id']==username and r.get('group_id')==group]
+        canonical=canonical_group(group,legacy_roles)
+        grants=[r for r in records if r['person_id']==username and r.get('group_id') is not None
+                and canonical_group(r['group_id'],legacy_roles)==canonical]
         if not grants or any(active(r) for r in grants):result.append(group)
     return result

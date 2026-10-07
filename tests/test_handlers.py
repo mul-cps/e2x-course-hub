@@ -182,6 +182,31 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Denied'})).code,403)
         self.assertEqual(self.fetch('/records/courses').code,403)
 
+    def test_expired_canonical_grant_blocks_legacy_alias_workspace_and_records(self):
+        group='lms.course.c.term.t.instructor'
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('terms',{'id':'term','course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('groups',{'id':group,'course_id':'c','term_id':'t'},actor='admin')
+            await self.provider.put('workspaces',{'id':'w','course_id':'c','term_id':'t','group_id':group},actor='admin')
+            await self.provider.put('memberships',{'id':'grant','course_id':'c','term_id':'t',
+                'person_id':'admin','group_id':group,'role':'instructor','expires':'9999-01-01T00:00:00Z'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.admin=False
+        for alias, roles in [('c.t.instructor',None),('c.t.teacher',{'teacher':'instructor'})]:
+            with self.subTest(alias=alias):
+                self._app.settings['legacy_rbac_roles']=roles
+                self.groups=[alias]
+                async def update_expiry(expires):
+                    grant=(await self.provider.members('c'))[0]
+                    await self.provider.put('memberships',{**grant,'expires':expires},actor='admin')
+                self.io_loop.run_sync(lambda:update_expiry('9999-01-01T00:00:00Z'))
+                self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,200)
+                self.io_loop.run_sync(lambda:update_expiry('2020-01-01T00:00:00Z'))
+                self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,403)
+                self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps({'id':'c','name':'Denied'})).code,403)
+                self.assertEqual(self.fetch('/records/courses').code,403)
+
     def test_reconciliation_barrier_cannot_be_cleared_by_crud(self):
         async def seed():
             await self.provider.put('courses',{'id':'c','reconciliation_pending':True},actor='service')

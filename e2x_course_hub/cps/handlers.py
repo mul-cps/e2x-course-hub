@@ -12,7 +12,8 @@ class RecordsHandler(BaseAPIHandler):
         current = await self.course_api.hub_api.get_user(user.username)
         if current.get('admin', False): return user.username
         from .expiry import effective_groups
-        groups=effective_groups(self.settings["course_provider"],user.username,current.get("groups",user.groups))
+        groups=effective_groups(self.settings["course_provider"],user.username,current.get("groups",user.groups),
+                                self.settings.get('legacy_rbac_roles'))
         if course_id:
             from .authorization import checker, Permission
             check = checker(user.username,groups,self.settings.get('legacy_rbac_roles'))
@@ -58,7 +59,8 @@ class RecordsHandler(BaseAPIHandler):
         if not latest.get('admin',False):
             from .authorization import checker,Permission
             from .expiry import effective_groups
-            groups=effective_groups(provider,user.username,latest.get('groups',user.groups))
+            groups=effective_groups(provider,user.username,latest.get('groups',user.groups),
+                                    self.settings.get('legacy_rbac_roles'))
             check=checker(user.username,groups,self.settings.get('legacy_rbac_roles'))
             def visible(record):
                 course=record['id'] if kind=='courses' else record.get('course_id')
