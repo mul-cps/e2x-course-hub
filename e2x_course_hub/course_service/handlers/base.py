@@ -88,7 +88,8 @@ class BaseAPIHandler(AuditMixin, BaseHandler):
         groups=updated_user.get("groups",[])
         if self.settings.get("course_provider"):
             from ...cps.expiry import effective_groups
-            groups=effective_groups(self.settings["course_provider"],hub_user["name"],groups)
+            groups=effective_groups(self.settings["course_provider"],hub_user["name"],groups,
+                                    self.settings.get('legacy_rbac_roles'))
         self._audit_actor = hub_user["name"]
         actor_context.set(hub_user["name"])
         return User(

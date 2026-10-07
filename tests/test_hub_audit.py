@@ -9,8 +9,34 @@ from e2x_course_hub.api.hub_api import HubAPI
 from e2x_course_hub.api.errors import HubAPIError
 from e2x_course_hub.cps.audit import actor_context
 from e2x_course_hub.cps.providers import LocalCourseProvider
+from e2x_course_hub.course_service.handlers.base import BaseAPIHandler
 
 class HubAuditTest(unittest.TestCase):
+    def test_upstream_handler_uses_configured_alias_when_filtering_expired_grants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = LocalCourseProvider(Path(tmp)/'db', 'cps')
+            class Hub:
+                async def get_user(self, username):
+                    return {'name':username, 'admin':False, 'groups':['c.t.teacher']}
+            handler = NS(get_current_user=lambda:{'name':'instructor'},
+                course_api=NS(hub_api=Hub()), settings={'course_provider':provider,
+                'legacy_rbac_roles':{'teacher':'instructor'}})
+            async def run():
+                await provider.put('courses', {'id':'c'}, actor='admin')
+                await provider.put('terms', {'id':'term','course_id':'c','term_id':'t'}, actor='admin')
+                await provider.put('groups', {'id':'lms.course.c.term.t.instructor','course_id':'c','term_id':'t'}, actor='admin')
+                grant = {'id':'grant','course_id':'c','term_id':'t','person_id':'instructor',
+                    'group_id':'lms.course.c.term.t.instructor','expires':'9999-01-01T00:00:00Z'}
+                await provider.put('memberships', grant, actor='admin')
+                active_user = await BaseAPIHandler.get_user(handler)
+                self.assertEqual(active_user.get_roles_in_course('c','t'), ['teacher'])
+                await provider.put('memberships', {**grant,'expires':'2020-01-01T00:00:00Z'}, actor='admin')
+                expired_user = await BaseAPIHandler.get_user(handler)
+                self.assertEqual(expired_user.groups, [])
+                self.assertEqual(expired_user.get_roles_in_course('c','t'), [])
+            try: asyncio.run(run())
+            finally: provider.db.close()
+
     def test_hub_mutations_record_actual_actor_before_after_and_denials(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider=LocalCourseProvider(Path(tmp)/'db','cps')
