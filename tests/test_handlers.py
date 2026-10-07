@@ -216,6 +216,14 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(response.code,400)
         self.assertTrue(self.io_loop.run_sync(self.provider.courses)[0]['reconciliation_pending'])
 
+    def test_membership_removal_context_is_service_controlled(self):
+        for field in ('membership_removal_pending', 'membership_removal_group_id'):
+            with self.subTest(field=field):
+                response = self.fetch('/records/courses', method='POST',
+                    body=json.dumps({'id':'c', field:'untrusted'}))
+                self.assertEqual(response.code, 400)
+        self.assertEqual(self.io_loop.run_sync(self.provider.courses), [])
+
     def test_membership_mutations_blocked_while_starting_or_reconciling(self):
         async def seed(state):
             await self.provider.put('courses',{'id':'c'},actor='admin')

@@ -145,6 +145,49 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         await self.service.start('w',actor='teacher')
         self.assertIn('spawn',self.calls)
 
+    async def removal_after_delete_failure(self, stage):
+        stale_members = await self.provider.members('c')
+        original_put = self.provider.put
+        failed = False
+        async def failed_put(kind, record, *, actor):
+            nonlocal failed
+            terminal = (kind == 'workspaces' and record.get('state') == 'stopped') if stage == 'workspace' else (kind == 'courses' and not record.get('reconciliation_pending'))
+            if terminal and not failed:
+                failed = True
+                raise RuntimeError('post-delete persistence failure')
+            return await original_put(kind, record, actor=actor)
+        self.provider.put = failed_put
+        with self.assertRaisesRegex(RuntimeError, 'post-delete'):
+            await self.service.remove_member('w', 'm', actor='teacher')
+        self.assertEqual(await self.provider.members('c'), [])
+        course = (await self.provider.courses())[0]
+        self.assertTrue(course['reconciliation_pending'])
+        await original_put('groups', {'id':'different', 'course_id':'c'}, actor='admin')
+        await original_put('workspaces', {'id':'wrong-group', 'course_id':'c', 'group_id':'different'}, actor='admin')
+        with self.assertRaises(ValueError):
+            await self.service.remove_member('wrong-group', 'm', actor='teacher')
+        with self.assertRaises(ValueError):
+            await self.service.remove_member('w', 'other-membership', actor='teacher')
+        if stage == 'workspace':
+            with self.assertRaisesRegex(ValueError, 'Membership removal'):
+                await self.service.reconcile_snapshot({'course':course, 'groups':[{'id':'g'}],
+                    'members':stale_members, 'groupings':[]}, actor='reconciler')
+        await self.service.remove_member('w', 'm', actor='teacher')
+        course = (await self.provider.courses())[0]
+        self.assertFalse(course['reconciliation_pending'])
+        self.assertIsNone(course['membership_removal_pending'])
+        self.assertIsNone(course['membership_removal_group_id'])
+        self.assertEqual((await self.service.get('w'))['state'], 'stopped')
+        self.assertEqual(await self.provider.members('c'), [])
+        self.assertEqual(self.calls.count('remove'), 1)
+        self.assertNotIn('spawn', self.calls)
+
+    async def test_last_member_removal_recovers_after_stopped_state_failure(self):
+        await self.removal_after_delete_failure('workspace')
+
+    async def test_last_member_removal_recovers_after_barrier_clear_failure(self):
+        await self.removal_after_delete_failure('course')
+
     async def test_two_writer_reconciliation_stops_both_before_group_mutation(self):
         workspace=await self.service.get('w')
         await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')

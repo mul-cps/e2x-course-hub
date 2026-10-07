@@ -75,7 +75,7 @@ class RecordsHandler(BaseAPIHandler):
     @web.authenticated
     async def post(self, kind):
         data = self.body()
-        if 'reconciliation_pending' in data:
+        if {'reconciliation_pending','membership_removal_pending','membership_removal_group_id'} & data.keys():
             raise web.HTTPError(400,reason='Reconciliation barriers are service-controlled')
         actor = await self.authorize_record(kind,data)
         await self.check_reconciliation_barrier(kind,data)

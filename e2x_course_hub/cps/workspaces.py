@@ -213,18 +213,22 @@ class WorkspaceService:
         async with AsyncExitStack() as stack:
             for workspace in affected:
                 await stack.enter_async_context(self.locks.setdefault(workspace['id'],asyncio.Lock()))
-            membership = next((r for r in await self.provider.members(target['course_id']) if r['id']==membership_id),None)
-            if not membership or membership.get('group_id') != target['group_id']:
-                raise ValueError('membership is not in this workspace')
-            if membership.get('source') != 'local':
-                raise PermissionError('external membership cannot be edited')
             course = next(c for c in await self.provider.courses() if c['id']==target['course_id'])
+            membership = next((r for r in await self.provider.members(target['course_id']) if r['id']==membership_id),None)
+            finishing_deleted = (membership is None and course.get('reconciliation_pending') and
+                course.get('membership_removal_pending') == membership_id and
+                course.get('membership_removal_group_id') == target['group_id'])
+            if not finishing_deleted and (not membership or membership.get('group_id') != target['group_id']):
+                raise ValueError('membership is not in this workspace')
+            if membership and membership.get('source') != 'local':
+                raise PermissionError('external membership cannot be edited')
             if course.get('reconciliation_pending') and course.get('membership_removal_pending') != membership_id:
                 raise ValueError('Course reconciliation barrier requires its original operation to finish')
             # Persist the guard before external mutations. A failed Shares response
             # must not let Start restore the still-persisted membership, even after Stop.
             await self.provider.put('courses',{**course,'reconciliation_pending':True,
-                'membership_removal_pending':membership_id},actor=actor)
+                'membership_removal_pending':membership_id,
+                'membership_removal_group_id':target['group_id']},actor=actor)
             affected = [await self.get(w['id']) for w in affected]
             for workspace in affected:
                 await self.provider.put('workspaces',{**workspace,'state':'reconciling'},actor=actor)
@@ -233,17 +237,19 @@ class WorkspaceService:
                 await self.hub.stop_confirmed(workspace)
                 await self.compute.release_after_shutdown(workspace['id'],confirmed_by_hub=True,
                                                          actor=actor,attempt=reservation.get('attempt'))
-            await self.hub.hub.remove_users_from_group(target['group_id'],[membership['person_id']])
+            if membership:
+                await self.hub.hub.remove_users_from_group(target['group_id'],[membership['person_id']])
             for workspace in affected:
                 await self.hub.replace_shares(workspace,target['group_id'])
-            await self.provider.delete('memberships',membership_id,actor=actor)
+            if membership:
+                await self.provider.delete('memberships',membership_id,actor=actor)
             for workspace in affected:
                 current = await self.get(workspace['id'])
                 await self.provider.put('workspaces',{**current,'state':'stopped',
                     'notice':'Membership changed; kernel interrupted. Files retained. Profile must be revalidated before restart.'},actor=actor)
             current_course = next(c for c in await self.provider.courses() if c['id']==target['course_id'])
             await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
-                'membership_removal_pending':None},actor=actor)
+                'membership_removal_pending':None,'membership_removal_group_id':None},actor=actor)
 
     @audited_lifecycle
     async def close(self, identifier, *, actor, archive=False):
@@ -301,7 +307,8 @@ class WorkspaceService:
         if configured_course is None:
             raise ValueError('Owned course required for reconciliation barrier')
         pending_removal = configured_course.get('membership_removal_pending')
-        if pending_removal and any(m['id']==pending_removal for m in await self.provider.members(course['id'])):
+        if pending_removal and any(m['id']==pending_removal for m in
+                [*await self.provider.members(course['id']), *snapshot['members']]):
             raise ValueError('Membership removal barrier requires the original removal to finish')
         await self.provider.put('courses',{**configured_course,'reconciliation_pending':True},actor=actor)
         workspaces = sorted([w for w in await self.provider.list('workspaces')
@@ -351,4 +358,4 @@ class WorkspaceService:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
             current_course = next(c for c in await self.provider.courses() if c['id']==course['id'])
             await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
-                'membership_removal_pending':None},actor=actor)
+                'membership_removal_pending':None,'membership_removal_group_id':None},actor=actor)
