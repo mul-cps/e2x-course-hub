@@ -5,6 +5,26 @@ from e2x_course_hub.cps.compute import ComputePolicyClient
 
 
 class WorkspaceRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prospective_policy_uses_read_only_preview(self):
+        client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+        client._request = AsyncMock(return_value={'policy_hash': 'current-hash'})
+        await client.validate_workspace('workspace-old', ['person'], 'cpu', {'cpu': '2'})
+        client._request.assert_awaited_once_with('workspace-policy/preview', 'POST', {
+            'workspace': 'workspace-old', 'members': ['person'], 'profile': 'cpu',
+            'ceiling': {'cpu': '2'}, 'principal': 'workspace:cps:workspace-old',
+        })
+
+    async def test_registered_policy_uses_returned_principal_and_hash(self):
+        client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cit')
+        client._request = AsyncMock(return_value={'policy_hash': 'current-hash'})
+        await client.validate_workspace('workspace-old', ['person'], 'cpu', {'cpu': '2'},
+            {'principal': 'workspace:cit:workspace-old', 'policy_hash': 'current-hash'})
+        client._request.assert_awaited_once_with('workspace-policy', 'POST', {
+            'workspace': 'workspace-old', 'members': ['person'], 'profile': 'cpu',
+            'ceiling': {'cpu': '2'}, 'principal': 'workspace:cit:workspace-old',
+            'policy_hash': 'current-hash',
+        })
+
     async def test_stable_group_reaches_production_storage_registration(self):
         client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
         client._request = AsyncMock(return_value={'registered': True})

@@ -25,6 +25,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
                 outer.calls.append('register')
                 assert workspace['pod']=='preserved'
                 assert validation['policy_hash']=='hash'
+                return {'principal':'workspace:cps:'+workspace['id'],'policy_hash':validation['policy_hash']}
             async def reservation_state(self,*args):return {'active':True,'attempt':'bound-attempt'}
             async def release_after_shutdown(self,*args,**kwargs):
                 assert kwargs['attempt']=='bound-attempt'
@@ -80,7 +81,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_registers_without_console_reserving(self):
         await self.service.start('w',actor='teacher')
-        self.assertEqual(self.calls,['provision','validate','register','sync','spawn','shares'])
+        self.assertEqual(self.calls,['validate','register','provision','validate','sync','spawn','shares'])
         self.assertEqual((await self.provider.members('c'))[0]['person_id'],'unchanged')
 
     async def test_failed_spawn_requires_matching_observed_release(self):
@@ -92,7 +93,36 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
     async def test_unqualified_provisioning_blocks_writer(self):
         service=WorkspaceService(self.provider,self.service.compute,self.hub)
         with self.assertRaisesRegex(RuntimeError,'provisioning'):await service.start('w',actor='teacher')
-        self.assertEqual(self.calls,[])
+        self.assertEqual(self.calls,['validate','register'])
+        self.assertEqual((await service.get('w'))['state'],'stopped')
+
+    async def test_registration_rejection_is_retryable_without_releasing_unknown_reservation(self):
+        original_register=self.service.compute.register_workspace
+        async def rejected(*args):raise ValueError('registration denied')
+        self.service.compute.register_workspace=rejected
+        with self.assertRaisesRegex(ValueError,'registration denied'):
+            await self.service.start('w',actor='teacher')
+        self.assertEqual((await self.service.get('w'))['state'],'stopped')
+        self.assertNotIn('release',self.calls)
+        self.assertNotIn('spawn',self.calls)
+        self.service.compute.register_workspace=original_register
+        await self.service.start('w',actor='teacher')
+        self.assertIn('spawn',self.calls)
+
+    async def test_strict_policy_rejection_is_retryable_without_spawning_or_releasing(self):
+        original_validate=self.service.compute.validate_workspace
+        async def rejected(*args):
+            if len(args)==5:raise ValueError('registered policy denied')
+            return await original_validate(*args)
+        self.service.compute.validate_workspace=rejected
+        with self.assertRaisesRegex(ValueError,'registered policy denied'):
+            await self.service.start('w',actor='teacher')
+        self.assertEqual((await self.service.get('w'))['state'],'stopped')
+        self.assertNotIn('release',self.calls)
+        self.assertNotIn('spawn',self.calls)
+        self.service.compute.validate_workspace=original_validate
+        await self.service.start('w',actor='teacher')
+        self.assertIn('spawn',self.calls)
 
     async def test_archive_requires_all_writers_and_verified_evidence(self):
         await self.provider.put('workspaces',{'id':'other','course_id':'c','group_id':'g'},actor='admin')
@@ -298,7 +328,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
             async def groups(self,course):return [{'id':'g'}]
             async def groupings(self,course):return []
         await reconcile(Fake(),lambda snapshot:self.service.reconcile_snapshot(snapshot,actor='reconciler'))
-        self.assertEqual(self.calls,['stop:w','release','revoke','validate','register','sync','shares'])
+        self.assertEqual(self.calls,['stop:w','release','revoke','validate','register','provision','validate','sync','shares'])
         # Reconciliation changes access/lifecycle, never hands local record ownership
         # to the external source or silently replaces its roster.
         for kind in ('memberships', 'groups', 'groupings'):

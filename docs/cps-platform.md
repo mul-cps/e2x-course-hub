@@ -77,9 +77,14 @@ identifiers, owned course/group IDs, selected profile and course ceiling. The co
 never derives a user's home from a display name. Neutral account provisioning and NFS
 mount policy remain trusted Hub adapter/deployment configuration.
 
-Workspace startup validates policy, acquires all-member reservations, synchronizes
-only the controlled group, starts the fixed profile and grants native group Shares.
-A startup error triggers a shutdown poll before reservation release. On member removal,
+Workspace startup previews current member entitlements and course ceilings, registers
+the source-owned descriptor, provisions its registered storage, then strictly validates
+the gateway-returned principal and policy hash before synchronizing the controlled group
+and starting the fixed profile. The Hub pre-spawn adapter acquires all-member GPU
+reservations before starting its server; the console then grants native group Shares.
+Bootstrap failures before a Hub start attempt restore a stopped, retryable state without
+releasing an unknown reservation. A Hub startup error triggers a shutdown poll before
+reservation release. On member removal,
 the adapter stops and confirms the server is absent from running Hub servers, removes
 group membership, revokes/replaces Shares, releases reservations, then updates local
 membership state. The stopped workspace reports kernel interruption and preserved files.

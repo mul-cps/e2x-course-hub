@@ -184,12 +184,19 @@ class WorkspaceService:
             workspace={**workspace,'course_ceiling':course['resource_ceiling'],
                        'namespace':bindings[0].get('namespace'), 'pod':bindings[0].get('pod')}
             await self.hub.assert_stopped(workspace)
-            # Persist the guard before asynchronous provisioning/registration/Hub calls.
-            await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor)
-            await self.filesystem.provision(workspace,actor=actor)
             members = await self.members(workspace)
             validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
-            await self.compute.register_workspace(workspace,members,validation)
+            # Persist the guard before asynchronous provisioning/registration/Hub calls.
+            await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor)
+            try:
+                registration = await self.compute.register_workspace(workspace,members,validation)
+                await self.filesystem.provision(workspace,actor=actor)
+                await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registration)
+            except Exception:
+                # No Hub spawn was attempted. Keep bootstrap failures retryable;
+                # an unknown central binding cannot prove a reservation release.
+                await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
+                raise
             try:
                 await self.hub.sync_group(workspace,await self.provider.members(workspace['course_id']))
                 await self.hub.start(workspace)
@@ -350,7 +357,10 @@ class WorkspaceService:
                                 'pod':bindings[0].get('pod'),'course_ceiling':configured['resource_ceiling']}
                     validation = await self.compute.validate_workspace(workspace['id'],people,
                                         workspace['profile'],registered['course_ceiling'])
-                    await self.compute.register_workspace(registered,people,validation)
+                    registration = await self.compute.register_workspace(registered,people,validation)
+                    await self.filesystem.provision(registered,actor=actor)
+                    await self.compute.validate_workspace(workspace['id'],people,
+                        workspace['profile'],registered['course_ceiling'],registration)
                 await self.hub.sync_group(eligible[0],members)
                 for workspace in eligible:
                     await self.hub.replace_shares(workspace,group_id)

@@ -55,9 +55,9 @@ class WorkspaceTests(unittest.TestCase):
                     self.assertEqual(calls,['stop'])
                 else:
                     await service.start('w',actor='admin')
-                    self.assertEqual(calls[:5],['validate','register','sync','spawn','shares'])
+                    self.assertEqual(calls[:6],['validate','register','validate','sync','spawn','shares'])
                     await service.remove_member('w','m',actor='admin')
-                    self.assertEqual(calls[5:],['stop','release','revoke','shares'])
+                    self.assertEqual(calls[6:],['stop','release','revoke','shares'])
                     self.assertEqual(await p.members('c'),[])
                     self.assertIn('Files retained',(await service.get('w'))['notice'])
                     with self.assertRaises(ValueError):await service.start('w',actor='admin')

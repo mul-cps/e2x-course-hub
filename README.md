@@ -445,8 +445,10 @@ Contributions are welcome! Please:
 - **Documentation**: https://github.com/Digiklausur/e2x-course-hub#readme
 ## Qualified local collaboration deployment contract
 
-Shared workspace starts validate current central policy, register the source-owned
-workspace, then POST only its fixed profile to Hub. GPU reservations are acquired
+Shared workspace starts preview current member entitlements and course ceilings,
+register the source-owned workspace, provision its registered storage, then strictly
+validate the returned principal and policy hash before posting its fixed profile to Hub.
+Bootstrap failures remain retryable without releasing unknown reservations. GPU reservations are acquired
 exclusively by the Hub pre-spawn adapter. Stops capture the source-owned reservation
 attempt before requesting Hub shutdown, then ask the gateway to release that exact
 attempt. The gateway independently verifies Hub and Kubernetes Pod absence; a 409

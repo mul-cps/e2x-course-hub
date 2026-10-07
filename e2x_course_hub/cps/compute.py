@@ -55,6 +55,12 @@ class ComputePolicyClient:
         # force-release its reservation; the gateway observes actual Pod absence.
         return await self._request('reservations/release', 'POST', {'workspace': workspace, 'attempt': attempt})
 
-    async def validate_workspace(self, workspace, members, profile, ceiling):
-        return await self._request('workspace-policy', 'POST', {'workspace': workspace,
-            'members': members, 'profile': profile, 'ceiling': ceiling})
+    async def validate_workspace(self, workspace, members, profile, ceiling, registration=None):
+        payload = {'workspace': workspace, 'members': members, 'profile': profile, 'ceiling': ceiling}
+        if registration is None:
+            payload['principal'] = 'workspace:' + self.console + ':' + workspace
+            path = 'workspace-policy/preview'
+        else:
+            payload.update(principal=registration['principal'], policy_hash=registration['policy_hash'])
+            path = 'workspace-policy'
+        return await self._request(path, 'POST', payload)
