@@ -42,7 +42,8 @@ class ComputePolicyClient:
             'principal': 'workspace:' + self.console + ':' + workspace['id'],
             'profiles': [workspace['profile']], 'ceiling': workspace['course_ceiling'],
             'namespace': workspace['namespace'], 'pod': workspace['pod'],
-            'policy_hash': validation['policy_hash']})
+            'policy_hash': validation['policy_hash'],
+            **({'group_id': workspace['group_id']} if 'group_id' in workspace else {})})
 
     async def reservation_state(self, workspace):
         return await self._request("reservations/" + quote(workspace, safe=""))
