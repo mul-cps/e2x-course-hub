@@ -218,6 +218,16 @@ class WorkspaceService:
                 raise ValueError('membership is not in this workspace')
             if membership.get('source') != 'local':
                 raise PermissionError('external membership cannot be edited')
+            course = next(c for c in await self.provider.courses() if c['id']==target['course_id'])
+            if course.get('reconciliation_pending') and course.get('membership_removal_pending') != membership_id:
+                raise ValueError('Course reconciliation barrier requires its original operation to finish')
+            # Persist the guard before external mutations. A failed Shares response
+            # must not let Start restore the still-persisted membership, even after Stop.
+            await self.provider.put('courses',{**course,'reconciliation_pending':True,
+                'membership_removal_pending':membership_id},actor=actor)
+            affected = [await self.get(w['id']) for w in affected]
+            for workspace in affected:
+                await self.provider.put('workspaces',{**workspace,'state':'reconciling'},actor=actor)
             for workspace in affected:
                 reservation = await self.compute.reservation_state(workspace['id'])
                 await self.hub.stop_confirmed(workspace)
@@ -231,6 +241,9 @@ class WorkspaceService:
                 current = await self.get(workspace['id'])
                 await self.provider.put('workspaces',{**current,'state':'stopped',
                     'notice':'Membership changed; kernel interrupted. Files retained. Profile must be revalidated before restart.'},actor=actor)
+            current_course = next(c for c in await self.provider.courses() if c['id']==target['course_id'])
+            await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
+                'membership_removal_pending':None},actor=actor)
 
     @audited_lifecycle
     async def close(self, identifier, *, actor, archive=False):
@@ -287,6 +300,9 @@ class WorkspaceService:
         configured_course = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
         if configured_course is None:
             raise ValueError('Owned course required for reconciliation barrier')
+        pending_removal = configured_course.get('membership_removal_pending')
+        if pending_removal and any(m['id']==pending_removal for m in await self.provider.members(course['id'])):
+            raise ValueError('Membership removal barrier requires the original removal to finish')
         await self.provider.put('courses',{**configured_course,'reconciliation_pending':True},actor=actor)
         workspaces = sorted([w for w in await self.provider.list('workspaces')
                              if w.get('course_id') == course['id']],key=lambda w:w['id'])
@@ -334,4 +350,5 @@ class WorkspaceService:
             for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
             current_course = next(c for c in await self.provider.courses() if c['id']==course['id'])
-            await self.provider.put('courses',{**current_course,'reconciliation_pending':False},actor=actor)
+        await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
+            'membership_removal_pending':None},actor=actor)

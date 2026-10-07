@@ -116,6 +116,35 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.calls.index('stop:other'),self.calls.index('remove'))
         self.assertEqual(await self.provider.members('c'),[])
 
+    async def test_partial_membership_removal_blocks_restart_until_retry(self):
+        person='00000000-0000-4000-8000-000000000002'
+        await self.provider.link_identities([{'hub':'cps','username':'remaining','email':'remaining@example.edu',
+            'person_id':person,'verified':True}],actor='admin')
+        await self.provider.put('memberships',{'id':'m2','course_id':'c','group_id':'g',
+            'person_id':'remaining','canonical_person_id':person},actor='admin')
+        original_shares=self.hub.replace_shares
+        async def failed_shares(*args):
+            raise RuntimeError('lost Shares response after group removal')
+        self.hub.replace_shares=failed_shares
+        with self.assertRaisesRegex(RuntimeError,'lost Shares'):
+            await self.service.remove_member('w','m',actor='teacher')
+        self.assertEqual(len(await self.provider.members('c')),2)
+        with self.assertRaises(ValueError):
+            await self.service.start('w',actor='teacher')
+        await self.service.close('w',actor='teacher')
+        with self.assertRaisesRegex(ValueError,'barrier'):
+            await self.service.start('w',actor='teacher')
+        course=(await self.provider.courses())[0]
+        with self.assertRaisesRegex(ValueError,'Membership removal'):
+            await self.service.reconcile_snapshot({'course':course,'groups':[{'id':'g'}],
+                'members':await self.provider.members('c'),'groupings':[]},actor='reconciler')
+        self.assertNotIn('spawn',self.calls)
+        self.hub.replace_shares=original_shares
+        await self.service.remove_member('w','m',actor='teacher')
+        self.assertEqual([m['person_id'] for m in await self.provider.members('c')],['remaining'])
+        await self.service.start('w',actor='teacher')
+        self.assertIn('spawn',self.calls)
+
     async def test_two_writer_reconciliation_stops_both_before_group_mutation(self):
         workspace=await self.service.get('w')
         await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')

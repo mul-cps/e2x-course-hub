@@ -18,6 +18,7 @@ class WorkspaceBinding(BaseModel):
 
 class Course(Record):
     reconciliation_pending: bool = False
+    membership_removal_pending: Optional[str] = None
     name: str = ''
     description: str = ''
     resource_ceiling: Optional[Dict[str,Any]] = None
