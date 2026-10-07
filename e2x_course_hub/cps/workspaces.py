@@ -350,5 +350,5 @@ class WorkspaceService:
             for workspace in workspaces:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
             current_course = next(c for c in await self.provider.courses() if c['id']==course['id'])
-        await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
-            'membership_removal_pending':None},actor=actor)
+            await self.provider.put('courses',{**current_course,'reconciliation_pending':False,
+                'membership_removal_pending':None},actor=actor)
