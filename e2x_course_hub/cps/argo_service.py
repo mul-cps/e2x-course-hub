@@ -78,6 +78,8 @@ class ArgoServiceConfig:
             raise ValueError("a dedicated service-{source}-argo-ui OAuth client is required")
         if not self.oauth_client_secret or len(self.cookie_secret) < 32:
             raise ValueError("a dedicated client secret and >=32-character cookie secret are required")
+        if urlsplit(self.native_argo_url).path not in ("", "/", "/argo", "/argo/"):
+            raise ValueError("native_argo_url must use the reviewed root or /argo base path")
         for name in ("public_origin", "hub_api_url", "hub_authorization_url", "compute_url",
                      "native_argo_url"):
             normalized = _https_url(getattr(self, name), name,
@@ -87,8 +89,6 @@ class ArgoServiceConfig:
             raise ValueError("hub_api_url must identify the existing Hub API")
         if not self.hub_authorization_url.endswith("/api/oauth2/authorize"):
             raise ValueError("hub_authorization_url must identify the existing Hub OAuth endpoint")
-        if urlsplit(self.native_argo_url).path != "/argo":
-            raise ValueError("native_argo_url must use the reviewed /argo base path")
         for name in ("hub_ca_file", "compute_ca_file", "native_argo_ca_file"):
             if not Path(getattr(self, name)).is_file():
                 raise ValueError(name + " must identify an installed trusted CA bundle")

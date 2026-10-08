@@ -65,7 +65,7 @@ class ConfigTest(unittest.TestCase):
                 {"compute_url": "http://compute.example"},
                 {"compute_url": "https://user:secret@compute.example"},
                 {"compute_url": "https://compute.example/another"},
-                {"native_argo_url": "https://native-argo.example/"},
+                {"native_argo_url": "https://native-argo.example/foreign"},
                 {"public_origin": "https://hub.example/?target=evil"},
                 {"compute_ca_file": "/missing/ca"},
             ):
@@ -80,6 +80,17 @@ class ConfigTest(unittest.TestCase):
                 for name in candidate.__dataclass_fields__
             }, clear=True):
                 self.assertEqual(ArgoServiceConfig.from_env(), candidate)
+
+    def test_native_backend_accepts_only_root_or_argo_prefix(self):
+        with tempfile.NamedTemporaryFile() as ca:
+            candidate = config(ca.name)
+            for suffix, expected in (("", ""), ("/", ""), ("/argo", "/argo"), ("/argo/", "/argo")):
+                with self.subTest(suffix=suffix):
+                    changed = replace(candidate, native_argo_url="https://native-argo.example" + suffix)
+                    self.assertEqual(changed.native_argo_url, "https://native-argo.example" + expected)
+            for suffix in ("/foreign", "/argo/api", "//", "/argo//", "/argo/../", "/%61rgo", "/?target=evil"):
+                with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                    replace(candidate, native_argo_url="https://native-argo.example" + suffix)
 
 
 class ArgoServiceTest(AsyncHTTPTestCase):
@@ -231,6 +242,22 @@ class ArgoServiceTest(AsyncHTTPTestCase):
     def headers(self, token="visitor-alice", **extra):
         return {"Cookie": self.cookie(token), "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-Mode": "cors", "Origin": "https://hub.example", **extra}
+
+    def test_root_backend_keeps_public_prefix_and_asset_allowlist(self):
+        self._app.settings["argo_config"] = replace(config(self.ca.name), native_argo_url="https://native-argo.example/")
+        headers = self.headers(**{"Sec-Fetch-Mode": "no-cors"})
+        page = self.fetch("/argo/workflows/cps-workflows", headers=headers, follow_redirects=False)
+        self.assertEqual(page.code, 200)
+        self.assertEqual(self.outbound[-1].url, "https://native-argo.example/")
+        asset = self.fetch("/argo/main.js", headers=headers, follow_redirects=False)
+        self.assertEqual(asset.code, 200)
+        self.assertEqual(self.outbound[-1].url, "https://native-argo.example/main.js")
+        self.assertNotIn("Authorization", self.outbound[-1].headers)
+        self.assertNotIn("Cookie", self.outbound[-1].headers)
+        calls = len(self.outbound)
+        denied = self.fetch("/argo/private.txt", headers=headers, follow_redirects=False)
+        self.assertEqual(denied.code, 404)
+        self.assertEqual(len(self.outbound), calls)
 
     def test_actual_hub_oauth_pkce_callback_cookie_and_replay(self):
         self.assertEqual(jupyterhub.__version__, "5.5.2")

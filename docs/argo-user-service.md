@@ -92,7 +92,8 @@ writes. This bounds source-level capacity and buffering, but real slow-browser
 and concurrency load qualification remains required before production activation.
 
 Only fixed `.js`, `.css`, image and font asset paths and the reviewed workflow
-SPA routes are requested from the pinned native Argo backend at `/argo/`.
+SPA routes are requested from the pinned native Argo backend at its reviewed
+root or `/argo/` prefix. The public service routes remain under `/argo/`.
 Asset requests carry no credential or browser header. `connect-src 'self'`
 prevents native UI connections to another authority. TLS certificate and
 hostname validation are always enabled for the Hub, compute and native asset
@@ -112,7 +113,7 @@ Every `ArgoServiceConfig` field can be supplied through an environment variable:
 | `ARGO_USER_HUB_API_URL` | Fixed existing Hub HTTPS API URL, ending in `/api` |
 | `ARGO_USER_HUB_AUTHORIZATION_URL` | Existing Hub HTTPS `/api/oauth2/authorize` URL |
 | `ARGO_USER_COMPUTE_URL` | Fixed HTTPS compute gateway origin, with no path |
-| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend URL ending in `/argo` |
+| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend root or `/argo` prefix |
 | `ARGO_USER_HUB_CA_FILE` | Installed trusted CA bundle for the Hub API |
 | `ARGO_USER_COMPUTE_CA_FILE` | Installed trusted CA bundle for compute |
 | `ARGO_USER_NATIVE_ARGO_CA_FILE` | Installed trusted CA bundle for native Argo |
@@ -188,11 +189,14 @@ image pinned by digest and record its version separately from this service.
 defines the embed step; [the static handler](https://github.com/argoproj/argo-workflows/blob/66e32e5cc367f223e2ecf4fbe852b95eaed83034/server/static/static.go#L66-L75)
 sets the supplied base href.
 
-The HTTPS native backend must preserve `/argo/`, return an index containing
-`<base href="/argo/">`, and serve the index at `/argo/` plus the relative script,
-image and font paths emitted by that index. Configure the native Argo server
-with `--base-href=/argo/` (or its equivalent `ARGO_BASE_HREF`). Do not point at a
-path-stripping route or a default `/` base. The shell requests the fixed native
+The HTTPS native backend must return an index containing
+`<base href="/argo/">` and serve the relative script, image and font paths at the
+selected backend root or `/argo/` prefix. Configure the native Argo server
+with `--base-href=/argo/` (or its equivalent `ARGO_BASE_HREF`). That browser base
+href is independent of the upstream asset prefix: the reviewed internal server
+serves JavaScript at `/main.<hash>.js`, so its backend URL is the HTTPS root.
+Check the JavaScript MIME type as well as status: a mistaken `/argo/` upstream
+prefix can return a 200 HTML SPA fallback for a script. The shell requests the fixed native
 index for reviewed workflow SPA navigation and only allowlisted static paths
 afterward, with no credentials. It never falls back to the native Argo API.
 
