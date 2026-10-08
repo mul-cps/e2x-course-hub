@@ -13,7 +13,7 @@ service tokens, SQLite PVCs and console instances. Run one replica per database.
 `database_path` must point to persistent storage. Back up using SQLite's backup API
 (`LocalCourseProvider.backup`) rather than copying a live database. Restore with
 the matching application revision and Hub database; test restoration before promotion.
-The initial SQLite schema is version 3 (`PRAGMA user_version`).
+The current SQLite schema is version 6 (`PRAGMA user_version`).
 
 ```python
 c.CourseServiceApp.console_owner = 'cps'
@@ -183,21 +183,62 @@ Normalized record validation rejects unknown fields and wrong types, checks owne
 term, group and grouping references, and prevents silent course/term reassociation of
 existing IDs. Group deletion preserves membership/workspace/grouping references.
 
-Identity authority is explicitly verified or administrator-reviewed **normalized email**, linked to an explicitly supplied stable canonical **person UUID**.
-`reviewed_email_mapping` takes explicit existing `(hub, username, email, person_id)` rows and proof
-flags, rejects missing/unreviewed/duplicate mappings, and never infers email from a username.
-Different CPS/CIT usernames may link to the same reviewed email and UUID. `POST /api/identities`
-is administrator-only and persists owned links. Membership canonical UUID values must
-match those stored links; normalized email remains metadata and the reviewed linkage authority. Existing username/path identifiers remain unchanged.
+Identity authority is either an explicit **verified email mapping** or a separately
+**administrator-reviewed account alias**, always linked to a supplied stable canonical
+**person UUID**. Email verification is optional for the reviewed account alias path.
+`reviewed_email_mapping` still requires `verified: true`; administrator review alone
+does not verify email. It never infers email or UUIDs from a username.
+`POST /api/identities` is administrator-only, rechecks current Hub admin status, and
+can link only the owning console's accounts. An alias request must name an existing
+account whose exact unchanged username is returned by that Hub's API:
+
+```json
+{"mappings":[{"authority":"reviewed_account_alias","hub":"cps",
+  "username":"existing-hub-name","person_id":"00000000-0000-4000-8000-000000000001",
+  "administrator_reviewed":true,"review_reason":"Reviewed against the owning Hub inventory",
+  "email":"optional@example.edu","verified":false}]}
+```
+
+`email` and `verified: false` may both be omitted. Alias email is metadata, never
+email authority; this path cannot write or promote `email_links.verified`. The
+service records the authenticated review actor and UTC time, rejecting caller-supplied
+actor/time fields. The shared membership/workspace resolver requires one valid stored
+authority matching the canonical UUID and rejects conflicting proofs, reassignment,
+foreign console ownership and duplicate aliases. Equal unverified emails may describe
+different people and never join them. Existing username/path identifiers remain unchanged.
 `import_upstream(..., reviewed_identity_rows=...)` fails on missing user mappings; an
 import without this argument preserves records but intentionally supplies no canonical
 identity and cannot reserve GPU workspaces until mappings are explicitly reviewed.
-No production identity mapping has been generated or installed.
+These source changes do not generate or install production identity mappings, seed
+gateway people, or activate global allowances. University federation issuer/subject
+and direct Dex identity remain disabled pending ICT qualification.
+Console alias review does not automatically mutate gateway runtime people or alias
+maps. Downstream activation requires a separately reviewed canonical handover that
+preserves each existing person UUID and uses exact owning Hub/username keys;
+email/name equality cannot identify or merge people during that handover.
 
-Schema version 3 adds explicit canonical UUID links while preserving earlier record keys.
-Earlier email-only links receive no inferred UUID: explicit administrator-reviewed mappings
-are required to migrate affected membership canonical IDs, and active workspaces must
-stop before that migration. Existing usernames, membership IDs and references remain intact.
+The identity POST response includes `linked[username]` with the supplied `person_id`
+and stored review actor/reason/time. There is no identity-list HTTP route. For a
+reviewed handover inventory, run this read-only query against a console SQLite backup
+made with `LocalCourseProvider.backup`; it exports source UUIDs and provenance without emails:
+
+```sql
+SELECT console AS hub, username, canonical_person_id AS person_id,
+       review_actor, review_reason, reviewed_at
+FROM reviewed_account_aliases
+ORDER BY console, username;
+```
+
+Exported rows are review evidence and do not authorize automatic gateway mutation.
+
+Schema version 6 adds `reviewed_account_aliases` with console/username keys, a unique
+canonical UUID per console, optional email, review actor, reason and UTC timestamp.
+The additive migration preserves existing record keys and email links, including
+unverified legacy rows, which remain ineffective without separate reviewed alias authority.
+Earlier email-only links receive no inferred UUID: an explicit reviewed mapping is
+required to update affected membership canonical IDs, and active workspaces must stop
+before that migration. Existing usernames, membership IDs and references remain intact.
+Version 6 databases require this or a newer matching application revision for restore.
 Request-level audit covers every console/upstream API mutation outcome, including invalid
 JSON, denied authorization, DELETE, assignment and lifecycle failures. Provider mutations
 are audited on success/failure; Hub API writes capture actual request actor and observed

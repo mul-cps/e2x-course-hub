@@ -119,12 +119,9 @@ class WorkspaceService:
         records = [r for r in await self.provider.members(workspace['course_id']) if active(r)]
         people = [r.get('canonical_person_id') for r in records if r.get('group_id') == workspace['group_id']]
         if hasattr(self.provider,'db'):
-            for record in records:
-                if record.get('group_id') != workspace['group_id']: continue
-                linked = self.provider.db.execute('SELECT canonical_person_id,verified FROM email_links WHERE console=? AND username=?',
-                    (self.provider.console,record['person_id'])).fetchone()
-                if not linked or linked['verified'] != 1 or linked['canonical_person_id'] != record.get('canonical_person_id'):
-                    raise ValueError('Email verification required before workspace member linkage')
+            from .identity import resolve_membership_person
+            people = [resolve_membership_person(self.provider,record) for record in records
+                      if record.get('group_id') == workspace['group_id']]
         if not people or None in people:
             raise ValueError('explicit canonical person mappings required for every workspace member')
         return sorted(set(people))

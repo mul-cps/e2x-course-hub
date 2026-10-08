@@ -156,6 +156,16 @@ class IdentityMappingHandler(RecordsHandler):
         if set(data)!={'mappings'} or not isinstance(data['mappings'],list):raise web.HTTPError(400,reason='Explicit reviewed mappings list required')
         if any(not isinstance(row,dict) for row in data['mappings']):raise web.HTTPError(400,reason='Mapping rows must be objects')
         if any(row.get('hub')!=self.settings['console_owner'] for row in data['mappings']):raise web.HTTPError(403,reason='Console can link only its own Hub accounts')
+        from ..api.errors import UserNotFoundError
+        for row in data['mappings']:
+            if row.get('authority')!='reviewed_account_alias':continue
+            username=row.get('username')
+            if not isinstance(username,str) or not username or username!=username.strip():
+                raise web.HTTPError(400,reason='Unchanged existing Hub username required')
+            try:account=await self.course_api.hub_api.get_user(username)
+            except UserNotFoundError:raise web.HTTPError(400,reason='Account alias must reference an existing user on the owning Hub')
+            if account.get('name')!=username:
+                raise web.HTTPError(400,reason='Account alias must preserve the exact owning Hub username')
         try:result=await self.settings['course_provider'].link_identities(data['mappings'],actor=actor)
         except (ValueError,TypeError,sqlite3.IntegrityError) as error:raise web.HTTPError(400,reason=str(error))
         self.write({'linked':result})

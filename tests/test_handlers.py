@@ -18,9 +18,13 @@ class HandlersTest(AsyncHTTPTestCase):
         self.admin = True
         self.groups = []
         self.hub_failure = False
+        self.hub_users = {'admin': 'admin', 'old-name': 'old-name'}
         outer = self
         class Hub:
-            async def get_user(self,name): return {'admin':outer.admin,'groups':outer.groups}
+            async def get_user(self,name):
+                from e2x_course_hub.api.errors import UserNotFoundError
+                if name not in outer.hub_users:raise UserNotFoundError(name)
+                return {'name':outer.hub_users[name],'admin':outer.admin,'groups':outer.groups}
         class Auth:
             def get_token(self,handler): return handler.request.headers.get('X-Visitor')
         class Proxy(ComputeVisitorProxy):
@@ -29,7 +33,10 @@ class HandlersTest(AsyncHTTPTestCase):
         class Records(RecordsHandler):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
-        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler
+        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
+        class Identity(IdentityMappingHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
         class Assignment(AssignmentHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
@@ -48,7 +55,7 @@ class HandlersTest(AsyncHTTPTestCase):
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
             (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
-            (r'/compute',Compute)],workspace_service=Service(),
+            (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
 
@@ -71,6 +78,42 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual([c.headers['X-CPS-Hub'] for c in calls],['cps','cps'])
         self.assertEqual([c.headers['Idempotency-Key'] for c in calls],['request-alice','request-bob'])
         self.assertTrue(all(c.url=='https://gateway.example/v1/me' for c in calls))
+
+    def test_admin_reviewed_alias_works_without_verifying_email_and_uses_authenticated_actor(self):
+        row={'hub':'cps','username':'old-name','person_id':'00000000-0000-4000-8000-000000000001',
+             'authority':'reviewed_account_alias','administrator_reviewed':True,'review_reason':'Reviewed Hub inventory',
+             'email':'person@example.edu','verified':False}
+        response=self.fetch('/identities',method='POST',body=json.dumps({'mappings':[row]}))
+        self.assertEqual(response.code,200)
+        result=json.loads(response.body)['linked']['old-name']
+        self.assertEqual(result['review_actor'],'admin')
+        self.assertEqual(self.provider.db.execute('SELECT count(*) FROM email_links').fetchone()[0],0)
+
+    def test_reviewed_alias_checks_current_admin_and_console_owner(self):
+        row={'hub':'cps','username':'old-name','person_id':'00000000-0000-4000-8000-000000000001',
+             'authority':'reviewed_account_alias','administrator_reviewed':True,'review_reason':'Reviewed Hub inventory'}
+        self.admin=False
+        self.groups=['c.t.instructor']
+        self.assertEqual(self.fetch('/identities',method='POST',body=json.dumps({'mappings':[row]})).code,403)
+        self.admin=True
+        self.assertEqual(self.fetch('/identities',method='POST',body=json.dumps({'mappings':[{**row,'hub':'cit'}]})).code,403)
+        self.assertEqual(self.provider.db.execute('SELECT count(*) FROM reviewed_account_aliases').fetchone()[0],0)
+
+    def test_reviewed_alias_requires_exact_existing_username_on_owning_hub(self):
+        row={'hub':'cps','username':'missing','person_id':'00000000-0000-4000-8000-000000000001',
+             'authority':'reviewed_account_alias','administrator_reviewed':True,'review_reason':'Reviewed Hub inventory'}
+        response=self.fetch('/identities',method='POST',body=json.dumps({'mappings':[row]}))
+        self.assertEqual(response.code,400)
+        self.hub_users['missing']='renamed-user'
+        response=self.fetch('/identities',method='POST',body=json.dumps({'mappings':[row]}))
+        self.assertEqual(response.code,400)
+        self.assertEqual(self.provider.db.execute('SELECT count(*) FROM reviewed_account_aliases').fetchone()[0],0)
+
+    def test_unverified_email_without_explicit_alias_authority_still_denied(self):
+        row={'hub':'cps','username':'old-name','person_id':'00000000-0000-4000-8000-000000000001',
+             'administrator_reviewed':True,'email':'person@example.edu','verified':False}
+        self.assertEqual(self.fetch('/identities',method='POST',body=json.dumps({'mappings':[row]})).code,400)
+        self.assertEqual(self.provider.db.execute('SELECT count(*) FROM reviewed_account_aliases').fetchone()[0],0)
 
     def test_jobset_routes_keep_each_visitor_token_and_deny_other_resources(self):
         calls=[]

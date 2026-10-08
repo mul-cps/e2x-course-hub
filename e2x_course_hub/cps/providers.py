@@ -47,14 +47,14 @@ class LocalCourseProvider:
         self._importing = False
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
-        if self.db.execute('PRAGMA user_version').fetchone()[0]>5:
+        if self.db.execute('PRAGMA user_version').fetchone()[0]>6:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         owners = set()
         if 'records' in tables:
             owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM records'))
-        for table in ('email_links','audit'):
+        for table in ('email_links','reviewed_account_aliases','audit'):
             if table in tables:
                 owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM '+table))
         if 'console_owner' in tables:
@@ -76,7 +76,12 @@ class LocalCourseProvider:
                     target TEXT NOT NULL, previous TEXT, current TEXT,
                     time TEXT NOT NULL, outcome TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS console_owner (owner TEXT PRIMARY KEY);
-                PRAGMA user_version=5;
+                CREATE TABLE IF NOT EXISTS reviewed_account_aliases (
+                    console TEXT NOT NULL, username TEXT NOT NULL, canonical_person_id TEXT NOT NULL,
+                    email TEXT, review_actor TEXT NOT NULL, review_reason TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL, PRIMARY KEY(console,username),
+                    UNIQUE(console,canonical_person_id));
+                PRAGMA user_version=6;
             ''')
             owners = {row[0] for row in self.db.execute('SELECT DISTINCT console FROM records')}
             owners.update(row[0] for row in self.db.execute('SELECT owner FROM console_owner'))
@@ -187,15 +192,32 @@ class LocalCourseProvider:
 
     @audited_mutation
     async def link_identities(self, rows, *, actor):
-        from .identity import reviewed_email_mapping
-        mapping=reviewed_email_mapping(rows)
+        from .identity import reviewed_email_mapping, reviewed_alias_mapping
+        if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):
+            raise ValueError('explicit mapping rows list required')
+        if not isinstance(actor,str) or not actor.strip():raise ValueError('identity review actor required')
+        if any(row.get('hub')!=self.console for row in rows):
+            raise ValueError('console can link only its own Hub accounts')
+        if any(row.get('authority','verified_email') not in ('verified_email','reviewed_account_alias') for row in rows):
+            raise ValueError('explicit supported identity authority required')
+        verified_rows=[row for row in rows if row.get('authority','verified_email')=='verified_email']
+        mapping=reviewed_email_mapping(verified_rows)
+        aliases=reviewed_alias_mapping([row for row in rows if row.get('authority')=='reviewed_account_alias'],actor=actor)
+        if mapping.keys() & aliases.keys():raise ValueError('duplicate account mapping authorities in request')
         proofs={(row['hub'],row['username']):row for row in rows}
         with self.db:
+            for (hub,username),identity in aliases.items():
+                person=identity['person_id']
+                self._check_identity_assignment(username,person)
+                previous=self.db.execute('SELECT * FROM reviewed_account_aliases WHERE console=? AND username=?',(hub,username)).fetchone()
+                legacy=self.db.execute('SELECT email FROM email_links WHERE console=? AND username=?',(hub,username)).fetchone()
+                self.db.execute('INSERT INTO reviewed_account_aliases VALUES (?,?,?,?,?,?,?) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,review_actor=excluded.review_actor,review_reason=excluded.review_reason,reviewed_at=excluded.reviewed_at',
+                    (hub,username,person,identity['email'],actor,identity['review_reason'],identity['reviewed_at']))
+                await self._migrate_membership_identity(username,person,legacy['email'] if legacy else None,actor)
+                self._audit(actor,'identity-aliases',username,json.dumps(dict(previous)) if previous else None,json.dumps(identity))
             for (hub,username),identity in mapping.items():
-                if hub!=self.console:continue
                 email,person=identity['email'],identity['person_id']
-                collision=self.db.execute('SELECT username FROM email_links WHERE console=? AND canonical_person_id=? AND username<>?',(hub,person,username)).fetchone()
-                if collision:raise ValueError('duplicate canonical person within Hub requires explicit alias migration')
+                self._check_identity_assignment(username,person)
                 previous=self.db.execute('SELECT email,canonical_person_id FROM email_links WHERE console=? AND username=?',(hub,username)).fetchone()
                 if previous:
                     if previous['canonical_person_id'] and previous['canonical_person_id']!=person:
@@ -203,21 +225,31 @@ class LocalCourseProvider:
                     if (previous['email']!=email or previous['canonical_person_id'] is None) and proofs[(hub,username)].get('administrator_reviewed') is not True:
                         raise ValueError('email/UUID handover requires explicit administrator-reviewed mapping')
                 self.db.execute('INSERT INTO email_links(console,username,email,canonical_person_id,verified) VALUES (?,?,?,?,1) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,canonical_person_id=excluded.canonical_person_id,verified=1',(hub,username,email,person))
-                for row in self.db.execute("SELECT id,payload FROM records WHERE console=? AND kind='memberships'",(hub,)).fetchall():
-                    membership=json.loads(row['payload'])
-                    if membership['person_id']!=username:continue
-                    old_canonical=membership.get('canonical_person_id')
-                    if old_canonical not in (None,person,previous['email'] if previous else None):
-                        raise ValueError('membership canonical identity conflicts with reviewed mapping')
-                    if old_canonical!=person:
-                        if any(w.get('group_id')==membership.get('group_id') and w.get('state')!='stopped' for w in await self.list('workspaces')):
-                            raise ValueError('stop affected workspace before canonical identity migration')
-                        updated={**membership,'canonical_person_id':person}
-                        payload=json.dumps(updated,sort_keys=True)
-                        self.db.execute("UPDATE records SET payload=? WHERE console=? AND kind='memberships' AND id=?",(payload,hub,row['id']))
-                        self._audit(actor,'identity-membership',row['id'],row['payload'],payload)
+                await self._migrate_membership_identity(username,person,previous['email'] if previous else None,actor)
                 self._audit(actor,'identities',username,json.dumps(dict(previous)) if previous else None,json.dumps(identity))
-        return {username:identity for (hub,username),identity in mapping.items() if hub==self.console}
+        return {username:identity for (_,username),identity in {**mapping,**aliases}.items()}
+
+    def _check_identity_assignment(self, username, person):
+        for table in ('email_links','reviewed_account_aliases'):
+            collision=self.db.execute('SELECT username FROM '+table+' WHERE console=? AND canonical_person_id=? AND username<>?',(self.console,person,username)).fetchone()
+            if collision:raise ValueError('duplicate canonical person within Hub requires explicit alias migration')
+            previous=self.db.execute('SELECT canonical_person_id FROM '+table+' WHERE console=? AND username=?',(self.console,username)).fetchone()
+            if previous and previous['canonical_person_id'] not in (None,person):
+                raise ValueError('existing canonical person reassignment requires a separate reviewed migration')
+
+    async def _migrate_membership_identity(self, username, person, legacy_email, actor):
+        for row in self.db.execute("SELECT id,payload FROM records WHERE console=? AND kind='memberships'",(self.console,)).fetchall():
+            membership=json.loads(row['payload'])
+            if membership['person_id']!=username:continue
+            old_canonical=membership.get('canonical_person_id')
+            if old_canonical not in (None,person,legacy_email):
+                raise ValueError('membership canonical identity conflicts with reviewed mapping')
+            if old_canonical!=person:
+                if any(w.get('group_id')==membership.get('group_id') and w.get('course_id')==membership.get('course_id') and w.get('state')!='stopped' for w in await self.list('workspaces')):
+                    raise ValueError('stop affected workspace before canonical identity migration')
+                payload=json.dumps({**membership,'canonical_person_id':person},sort_keys=True)
+                self.db.execute("UPDATE records SET payload=? WHERE console=? AND kind='memberships' AND id=?",(payload,self.console,row['id']))
+                self._audit(actor,'identity-membership',row['id'],row['payload'],payload)
 
     def backup(self, path):
         with sqlite3.connect(str(path)) as target:
