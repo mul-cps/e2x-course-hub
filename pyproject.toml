@@ -31,6 +31,9 @@ dependencies = [
   "e2x-hub-rbac @ git+https://github.com/DigiKlausur/e2x-hub-rbac.git@4683d1a09051f8aa0d38a2e6ab181b4979b246b2"
 ]
 
+[project.scripts]
+personal-argo-service = "e2x_course_hub.cps.argo_app:main"
+
 [project.urls]
 Documentation = "https://github.com/Digiklausur/e2x-course-hub#readme"
 Issues = "https://github.com/Digiklausur/e2x-course-hub/issues"

@@ -1,0 +1,26 @@
+# Same reviewed Python manifest index as the course-console image (2026-10-05).
+# Native Argo 3.7.18 assets stay on the separately pinned HTTPS Argo server.
+FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY e2x_course_hub/ e2x_course_hub/
+COPY share/ share/
+# This process does not serve the administrative frontend or require cps-compute.
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 && python -m pip install --no-cache-dir hatchling hatch-jupyter-builder && HATCH_BUILD_NO_HOOKS=true python -m hatchling build -t wheel && python -m pip wheel --wheel-dir /wheels pip==26.2.1 dist/*.whl
+
+FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.title="Personal Argo Hub OAuth service" \
+      org.opencontainers.image.revision=$SOURCE_REVISION
+COPY --from=builder /wheels/ /wheels/
+RUN python -m pip install --no-cache-dir --no-index --no-deps /wheels/pip-26.2.1-py3-none-any.whl && python -m pip install --no-cache-dir --no-index --no-deps /wheels/*.whl && python -m pip check && rm -rf /wheels && useradd --uid 10001 --create-home argo-ui
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ARGO_USER_LISTEN_HOST=0.0.0.0 \
+    ARGO_USER_LISTEN_PORT=10202
+USER 10001:10001
+WORKDIR /home/argo-ui
+EXPOSE 10202
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["personal-argo-service"]
