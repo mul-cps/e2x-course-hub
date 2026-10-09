@@ -6,6 +6,7 @@ from tornado import web
 from tornado.httpclient import HTTPClientError
 from .handlers import RecordsHandler
 from .assignments import allocate
+from .platform_status import default_handlers as status_handlers
 
 class ComputeHandler(RecordsHandler):
     @web.authenticated
@@ -95,6 +96,7 @@ default_handlers = [
     (r'/api/assignments/allocate',AssignmentHandler),
     (r'/api/workspaces/([^/]+)/(start|stop|remove-member)',WorkspaceHandler),
 ]
+default_handlers += status_handlers
 
 class WorkspaceCreateHandler(RecordsHandler):
     @web.authenticated

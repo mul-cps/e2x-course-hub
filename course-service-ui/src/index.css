@@ -1107,3 +1107,48 @@ button:focus-visible {
 .table-scroll {
   position: relative;
 }
+
+/* Operator-published sharing status on compute and shared workspace pages. */
+.platform-status-panel {
+  background: #fff;
+  border: 1px solid #dce5f0;
+  border-left: 4px solid #6284ab;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 0 0 24px;
+}
+.platform-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.platform-status-panel h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  color: #172b45;
+}
+.platform-status-panel p {
+  margin: 8px 0 0;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.platform-status-panel .platform-status-meta {
+  color: #687a90;
+  font-size: 12px;
+}
+.platform-status-qualification,
+.platform-status-limited-pilot {
+  background: #fff4d8;
+  color: #795510;
+}
+.platform-status-enabled {
+  background: #e1f4e8;
+  color: #236b40;
+}
+.platform-status-unavailable {
+  background: #edf0f4;
+  color: #5f6b7a;
+}

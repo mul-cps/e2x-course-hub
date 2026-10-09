@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { requests } from "../api/client";
 import { config } from "../config";
+import PlatformStatusPanel from "./PlatformStatusPanel";
 
 type Row = Record<string, unknown>;
 type Field = {
@@ -581,6 +582,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           </button>
         )}
       </div>
+      {(kind === "compute" || kind === "workspaces") && <PlatformStatusPanel />}
       {kind === "compute" && (
         <form
           className="lookup-panel"
