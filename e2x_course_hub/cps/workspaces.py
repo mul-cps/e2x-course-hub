@@ -296,7 +296,8 @@ class WorkspaceService:
             await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=reservation.get("attempt"))
             # No filesystem permission claim: external archive operation must stop all other writers too.
             await self.hub.revoke_shares(workspace)
-            await self.provider.put('workspaces',{**workspace,'state':'stopped','archive_pending':archive or workspace.get('archive_pending',False)},actor=actor)
+            await self.provider.put('workspaces',{**workspace,'state':'stopped','notice':None,
+                'archive_pending':archive or workspace.get('archive_pending',False)},actor=actor)
 
     @audited_lifecycle
     @course_serialized

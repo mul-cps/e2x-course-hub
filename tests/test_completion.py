@@ -147,6 +147,37 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('reservations retained',workspace['notice'])
         self.assertNotIn('release',self.calls)
 
+    async def test_successful_stop_clears_obsolete_cleanup_failure_notice(self):
+        workspace=await self.service.get('w')
+        await self.provider.put('workspaces',{**workspace,'state':'reconciling',
+            'notice':'Workspace start failed; shutdown/cleanup is unresolved. GPU reservations retained until confirmed cleanup.'},actor='teacher')
+        await self.service.close('w',actor='teacher')
+        stopped=await self.service.get('w')
+        self.assertEqual(stopped['state'],'stopped')
+        self.assertIsNone(stopped.get('notice'))
+        self.assertEqual(self.calls,['stop:w','release','revoke'])
+
+    async def test_failed_stop_preserves_cleanup_notice_until_confirmed_retry(self):
+        notice='Workspace start failed; shutdown/cleanup is unresolved. GPU reservations retained until confirmed cleanup.'
+        for failed_step in ('stop','release'):
+            with self.subTest(failed_step=failed_step):
+                self.calls.clear()
+                self.stop_failure=failed_step=='stop';self.release_failure=failed_step=='release'
+                workspace=await self.service.get('w')
+                await self.provider.put('workspaces',{**workspace,'state':'reconciling','notice':notice},actor='teacher')
+                with self.assertRaises(TimeoutError):await self.service.close('w',actor='teacher')
+                unresolved=await self.service.get('w')
+                self.assertEqual(unresolved['state'],'reconciling')
+                self.assertEqual(unresolved['notice'],notice)
+                self.assertEqual(self.calls,['stop:w'] if failed_step=='stop' else ['stop:w','release'])
+                self.stop_failure=False;self.release_failure=False
+                self.calls.clear()
+                await self.service.close('w',actor='teacher')
+                stopped=await self.service.get('w')
+                self.assertEqual(stopped['state'],'stopped')
+                self.assertIsNone(stopped.get('notice'))
+                self.assertEqual(self.calls,['stop:w','release','revoke'])
+
     async def test_unqualified_provisioning_blocks_writer(self):
         service=WorkspaceService(self.provider,self.service.compute,self.hub)
         with self.assertRaisesRegex(RuntimeError,'provisioning'):await service.start('w',actor='teacher')
