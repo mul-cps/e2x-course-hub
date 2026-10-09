@@ -89,6 +89,63 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TimeoutError):await self.service.start('w',actor='teacher')
         self.assertEqual(self.calls[-2:],['stop:w','release'])
         self.assertTrue(any(a['kind']=='workspace-lifecycle' and a['outcome']=='failure' for a in self.provider.audit()))
+        workspace = await self.service.get('w')
+        self.assertEqual(workspace['state'],'reconciling')
+        self.assertIn('reservations retained',workspace['notice'])
+
+    async def test_asynchronous_spawn_failure_is_not_marked_running(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from e2x_course_hub.cps.workspaces import HubWorkspaceAdapter
+        api = SimpleNamespace(api_url='http://hub/hub/api',
+            request=AsyncMock(return_value=SimpleNamespace(code=202)),
+            get_user=AsyncMock(return_value={'servers':{}}))
+        self.hub.start = HubWorkspaceAdapter(api).start
+        with self.assertRaisesRegex(RuntimeError,'spawn failed'):
+            await self.service.start('w',actor='teacher')
+        workspace=await self.service.get('w')
+        self.assertEqual(workspace['state'],'stopped')
+        self.assertIn('start failed',workspace['notice'])
+        self.assertNotIn('shares',self.calls)
+        self.assertEqual(self.calls[-2:],['stop:w','release'])
+
+    async def test_workspace_remains_starting_until_hub_is_ready(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from e2x_course_hub.cps.workspaces import HubWorkspaceAdapter
+        waiting=asyncio.Event();ready=asyncio.Event();observations=0
+        async def get_user(username):
+            nonlocal observations
+            observations+=1
+            if observations==1:
+                return {'servers':{'rtc':{'pending':'spawn','ready':False}}}
+            waiting.set()
+            await ready.wait()
+            return {'servers':{'rtc':{'pending':None,'ready':True}}}
+        api=SimpleNamespace(api_url='http://hub/hub/api',get_user=get_user,
+            request=AsyncMock(return_value=SimpleNamespace(code=202)))
+        self.hub.start=HubWorkspaceAdapter(api).start
+        with patch('e2x_course_hub.cps.workspaces.asyncio.sleep',new=AsyncMock()):
+            starting=asyncio.create_task(self.service.start('w',actor='teacher'))
+            try:
+                await asyncio.wait_for(waiting.wait(),2)
+                self.assertEqual((await self.service.get('w'))['state'],'starting')
+                self.assertNotIn('shares',self.calls)
+                self.assertFalse(starting.done())
+            finally:
+                ready.set()
+                await asyncio.wait_for(starting,2)
+        self.assertEqual((await self.service.get('w'))['state'],'running')
+        self.assertIn('shares',self.calls)
+
+    async def test_failed_spawn_keeps_guard_when_hub_shutdown_is_unconfirmed(self):
+        self.spawn_failure=True;self.stop_failure=True
+        with self.assertRaises(TimeoutError):
+            await self.service.start('w',actor='teacher')
+        workspace=await self.service.get('w')
+        self.assertEqual(workspace['state'],'reconciling')
+        self.assertIn('reservations retained',workspace['notice'])
+        self.assertNotIn('release',self.calls)
 
     async def test_unqualified_provisioning_blocks_writer(self):
         service=WorkspaceService(self.provider,self.service.compute,self.hub)

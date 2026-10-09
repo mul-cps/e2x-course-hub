@@ -41,9 +41,16 @@ class HubWorkspaceAdapter:
         server = quote(workspace['hub_server'],safe='')
         return self.hub.api_url.rstrip('/') + f'/users/{user}/servers/{server}' + suffix
 
-    async def assert_stopped(self, workspace):
+    async def server_status(self, workspace):
         user = await self.hub.get_user(workspace['hub_user'])
-        if workspace['hub_server'] in user.get('servers',{}):
+        # A scope-filtered user model can omit servers. That is not evidence
+        # that a pending writer stopped or that an allowance can be released.
+        if not isinstance(user.get('servers'),dict):
+            raise RuntimeError('Hub server status unavailable; lifecycle cannot be confirmed')
+        return user['servers'].get(workspace['hub_server'])
+
+    async def assert_stopped(self, workspace):
+        if await self.server_status(workspace) is not None:
             raise ValueError('Stop existing server before workspace policy/access reconciliation')
 
     async def stop_confirmed(self, workspace):
@@ -53,8 +60,7 @@ class HubWorkspaceAdapter:
             if error.code != 404: raise
         deadline = asyncio.get_running_loop().time() + self.timeout
         while True:
-            user = await self.hub.get_user(workspace['hub_user'])
-            if workspace['hub_server'] not in user.get('servers',{}): return True
+            if await self.server_status(workspace) is None: return True
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError('Hub shutdown not confirmed; GPU reservations retained')
             await asyncio.sleep(0.2)
@@ -92,7 +98,29 @@ class HubWorkspaceAdapter:
 
     async def start(self, workspace):
         # Only the selected fixed policy profile enters spawn; no user Pod/resource overrides.
-        await self.hub.request(self.path(workspace,''),'POST',json.dumps({'profile':workspace['profile']}))
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        try:
+            response = await asyncio.wait_for(self.hub.request(
+                self.path(workspace,''),'POST',json.dumps({'profile':workspace['profile']})),
+                timeout=max(0,deadline-asyncio.get_running_loop().time()))
+            if response.code not in (201,202):
+                raise RuntimeError('Hub did not accept the workspace spawn')
+            # Hub 5 returns 202 before asynchronous spawn completes. Even 201
+            # is checked against the authoritative server model before access
+            # or a running state is published by the console.
+            while True:
+                remaining = deadline-asyncio.get_running_loop().time()
+                if remaining <= 0: raise TimeoutError()
+                server = await asyncio.wait_for(self.server_status(workspace),timeout=remaining)
+                if server is None or server.get('stopped') is True:
+                    raise RuntimeError('Hub spawn failed before the workspace became ready')
+                if server.get('ready') is True and server.get('pending') is None:
+                    return
+                if server.get('pending') != 'spawn':
+                    raise RuntimeError('Hub spawn failed: workspace is neither ready nor starting')
+                await asyncio.sleep(min(0.2,max(0,deadline-asyncio.get_running_loop().time())))
+        except TimeoutError as error:
+            raise TimeoutError('Hub readiness not confirmed; workspace start requires shutdown reconciliation') from error
 
 class UnconfiguredFilesystemAdapter:
     async def provision(self, workspace, *, actor):
@@ -200,12 +228,16 @@ class WorkspaceService:
                 await self.hub.replace_shares(workspace,workspace['group_id'])
             except Exception:
                 # A failed response can still leave a starting server; confirm shutdown first.
+                failed = {**workspace,'state':'reconciling',
+                    'notice':'Workspace start failed; shutdown/cleanup is unresolved. GPU reservations retained until confirmed cleanup.'}
+                await self.provider.put('workspaces',failed,actor=actor)
                 reservation = await self.compute.reservation_state(identifier)
                 await self.hub.stop_confirmed(workspace)
                 await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=reservation.get("attempt"))
-                await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
+                await self.provider.put('workspaces',{**workspace,'state':'stopped',
+                    'notice':'Workspace start failed. Shutdown and reservation cleanup confirmed; retry is available.'},actor=actor)
                 raise
-            await self.provider.put('workspaces',{**workspace,'state':'running'},actor=actor)
+            await self.provider.put('workspaces',{**workspace,'state':'running','notice':None},actor=actor)
 
     @audited_lifecycle
     @course_serialized
