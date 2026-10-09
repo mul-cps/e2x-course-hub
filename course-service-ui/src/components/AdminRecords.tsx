@@ -206,11 +206,20 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const dialogRef = useRef<HTMLElement>(null);
   const [removeMember, setRemoveMember] = useState<Row | null>(null),
     [membership, setMembership] = useState("");
+  const [profileDetails, setProfileDetails] = useState<Row | null>(null);
+  const [profileDiscovery, setProfileDiscovery] = useState<{
+    workspace: string;
+    loading: boolean;
+    profiles: Row[];
+    failed: boolean;
+  }>({ workspace: "", loading: true, profiles: [], failed: false });
   const [confirmation, setConfirmation] = useState<{
     message: string;
     run: () => Promise<void>;
   } | null>(null);
-  const dialogOpen = Boolean(draft || confirmation || removeMember);
+  const dialogOpen = Boolean(
+    draft || confirmation || removeMember || profileDetails,
+  );
   useEffect(() => {
     if (!dialogOpen) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -240,6 +249,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         setDraft(null);
         setConfirmation(null);
         setRemoveMember(null);
+        setProfileDetails(null);
       }
       if (e.key === "Tab") {
         const items = focusable(),
@@ -284,6 +294,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     setLoading(true);
     setRecords([]);
     setDraft(null);
+    setProfileDetails(null);
     setSearch("");
     setError("");
     setNotice("");
@@ -363,6 +374,61 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       active = false;
     };
   }, [kind, workspaceProfileScope]);
+  useEffect(() => {
+    if (kind !== "workspaces" || !profileDetails) return;
+    let active = true;
+    const workspace = String(profileDetails.id);
+    setProfileDiscovery({
+      workspace,
+      loading: true,
+      profiles: [],
+      failed: false,
+    });
+    requests
+      .get(`${config.apiUrl}/compute`, { workspace })
+      .then((result) => {
+        if (active)
+          setProfileDiscovery({
+            workspace,
+            loading: false,
+            profiles: rowsFrom(result),
+            failed: false,
+          });
+      })
+      .catch(() => {
+        if (active)
+          setProfileDiscovery({
+            workspace,
+            loading: false,
+            profiles: [],
+            failed: true,
+          });
+      });
+    return () => {
+      active = false;
+    };
+  }, [kind, profileDetails]);
+  const detailProfiles = profileDiscovery.profiles.filter((profile) => {
+    if (profile.kind !== "interactive" || profile.enabled !== true)
+      return false;
+    const gpu = profile.gpu as Row | undefined;
+    const groupScoped =
+      profile.nativeGroupWorkspace !== undefined ||
+      profile.nativePilotWorkspace !== undefined ||
+      (gpu && gpu.mode !== "none") ||
+      String(profile.id).startsWith("interactive-shared-") ||
+      String(profile.id).startsWith("interactive-exclusive-");
+    return (
+      !groupScoped ||
+      profile.nativeGroupWorkspace === String(profileDetails?.id)
+    );
+  });
+  const detailsPending =
+    profileDiscovery.loading ||
+    profileDiscovery.workspace !== String(profileDetails?.id);
+  const storedProfileAvailable = detailProfiles.some(
+    (profile) => profile.id === profileDetails?.profile,
+  );
   async function mutate(run: () => Promise<unknown>, message: string) {
     setBusy(true);
     setError("");
@@ -791,6 +857,21 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                           </details>
                         ) : kind === "workspaces" ? (
                           <>
+                            <button
+                              aria-label={`View workspace profile ${display(r.id)}`}
+                              onClick={() => {
+                                setProfileDiscovery({
+                                  workspace: String(r.id),
+                                  loading: true,
+                                  profiles: [],
+                                  failed: false,
+                                });
+                                setProfileDetails({ ...r });
+                              }}
+                            >
+                              <Cpu size={15} />
+                              Compute profile
+                            </button>
                             {["start", "stop"].map((action) => (
                               <button
                                 key={action}
@@ -1143,6 +1224,83 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+      {profileDetails && (
+        <div className="dialog-backdrop">
+          <section
+            ref={dialogRef}
+            className="editor-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="profile-details-title"
+          >
+            <div className="dialog-heading">
+              <div>
+                <p className="eyebrow">Read-only details</p>
+                <h2 id="profile-details-title">Workspace compute profile</h2>
+              </div>
+              <button
+                aria-label="Close profile details"
+                onClick={() => setProfileDetails(null)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <dl className="form-grid">
+              <div>
+                <dt>Workspace</dt>
+                <dd>{display(profileDetails.id)}</dd>
+              </div>
+              <div>
+                <dt>Workspace state</dt>
+                <dd>{display(profileDetails.state)}</dd>
+              </div>
+              <div>
+                <dt>Stored profile</dt>
+                <dd data-testid="stored-workspace-profile">
+                  {display(profileDetails.profile)}
+                </dd>
+              </div>
+              <div>
+                <dt>Current availability</dt>
+                <dd data-testid="stored-profile-availability" role="status">
+                  {detailsPending
+                    ? "Checking availability…"
+                    : profileDiscovery.failed
+                      ? "Availability could not be verified"
+                      : storedProfileAvailable
+                        ? "Available for this workspace"
+                        : "Unavailable in current workspace policy"}
+                </dd>
+              </div>
+            </dl>
+            {profileDiscovery.failed && !detailsPending && (
+              <p role="alert">
+                Profile discovery was denied or unavailable. The stored profile
+                is shown above; availability has not been confirmed.
+              </p>
+            )}
+            {!detailsPending && !profileDiscovery.failed && (
+              <div data-testid="workspace-available-profiles">
+                <h3>Available interactive profiles</h3>
+                {detailProfiles.length ? (
+                  <ul>
+                    {detailProfiles.map((profile) => (
+                      <li key={String(profile.id)}>{display(profile.id)}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>No profiles are currently available for this workspace.</p>
+                )}
+              </div>
+            )}
+            <p className="form-intro">
+              Profiles are managed through shared compute policy. Starting this
+              workspace still checks member permissions, resource ceilings and
+              reservations.
+            </p>
           </section>
         </div>
       )}

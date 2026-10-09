@@ -747,3 +747,293 @@ test("keyboard skip link and navigation announce destination", async ({
   await expect(page).toHaveTitle("Projects · Compute Platform");
   await expect(page.locator("#main-content")).toBeFocused();
 });
+
+test("existing workspace compute details use exact scope and never write", async ({
+  page,
+}) => {
+  const scopes: (string | null)[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/local/workspaces",
+    (route) =>
+      route.fulfill({
+        json: {
+          records: [
+            { ...initial.workspaces[0], profile: "interactive-shared-5" },
+          ],
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) => {
+      const workspace = new URL(route.request().url()).searchParams.get(
+        "workspace",
+      );
+      scopes.push(workspace);
+      return route.fulfill({
+        json: {
+          profiles: {
+            cpu: { kind: "interactive", enabled: true },
+            "interactive-shared-5": {
+              kind: "interactive",
+              enabled: true,
+              nativeGroupWorkspace: "ws-a",
+              gpu: { mode: "shared", nominalMemoryGiB: 5 },
+            },
+          },
+        },
+      });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "View workspace profile ws-a", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Workspace compute profile",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("ws-a", { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByText("Stored profile", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByTestId("stored-workspace-profile")).toHaveText(
+    "interactive-shared-5",
+  );
+  await expect(dialog.getByText("stopped", { exact: true })).toBeVisible();
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Available for this workspace",
+  );
+  await expect(
+    dialog.getByTestId("workspace-available-profiles"),
+  ).toContainText("interactive-shared-5");
+  await expect(dialog.locator("input, select, form")).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", { name: /Save|Start|Stop/ }),
+  ).toHaveCount(0);
+  await dialog
+    .getByRole("button", { name: "Close profile details", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
+  expect(scopes).toContain("ws-a");
+  expect(writes).toEqual([]);
+});
+
+test("existing workspace compute details reject unscoped foreign batch and disabled GPU profiles", async ({
+  page,
+}) => {
+  await page.route(
+    (url) => url.pathname === "/api/local/workspaces",
+    (route) =>
+      route.fulfill({
+        json: {
+          records: [
+            { ...initial.workspaces[0], profile: "interactive-shared-5" },
+          ],
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) =>
+      route.fulfill({
+        json: {
+          profiles: {
+            cpu: { kind: "interactive", enabled: true },
+            "interactive-shared-5": {
+              kind: "interactive",
+              enabled: true,
+              gpu: {
+                mode: "shared",
+                qualification: { status: "qualified-group" },
+              },
+            },
+            "interactive-shared-10": {
+              kind: "interactive",
+              enabled: true,
+              nativeGroupWorkspace: "ws-other",
+              gpu: { mode: "shared" },
+            },
+            "batch-shared-5": {
+              kind: "batch",
+              enabled: true,
+              nativeGroupWorkspace: "ws-a",
+              gpu: { mode: "shared" },
+            },
+            "interactive-shared-20": {
+              kind: "interactive",
+              enabled: false,
+              nativeGroupWorkspace: "ws-a",
+              gpu: { mode: "shared" },
+            },
+          },
+        },
+      }),
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "View workspace profile ws-a", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Workspace compute profile",
+  });
+  await expect(dialog.getByTestId("stored-workspace-profile")).toHaveText(
+    "interactive-shared-5",
+  );
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Unavailable in current workspace policy",
+  );
+  await expect(
+    dialog.getByTestId("workspace-available-profiles").locator("li"),
+  ).toHaveText(["cpu"]);
+  expect(writes).toEqual([]);
+});
+
+test("existing workspace compute details do not claim availability while pending", async ({
+  page,
+}) => {
+  let delayed: Route | undefined;
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) => {
+      if (
+        new URL(route.request().url()).searchParams.get("workspace") === "ws-a"
+      ) {
+        delayed = route;
+        return;
+      }
+      return route.fulfill({ json: { profiles: {} } });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "View workspace profile ws-a", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Workspace compute profile",
+  });
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Checking availability…",
+  );
+  await expect(dialog.getByTestId("workspace-available-profiles")).toHaveCount(
+    0,
+  );
+  await expect.poll(() => Boolean(delayed)).toBeTruthy();
+  await delayed!.fulfill({
+    json: { profiles: { cpu: { kind: "interactive", enabled: true } } },
+  });
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Available for this workspace",
+  );
+  expect(writes).toEqual([]);
+});
+
+test("existing workspace compute details keep denied discovery unverified", async ({
+  page,
+}) => {
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) =>
+      route.fulfill({
+        status: 403,
+        json: {
+          detail: "Owned course scope or console administrator required",
+        },
+      }),
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "View workspace profile ws-a", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Workspace compute profile",
+  });
+  await expect(dialog.getByTestId("stored-workspace-profile")).toHaveText(
+    "cpu",
+  );
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Availability could not be verified",
+  );
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Profile discovery was denied or unavailable",
+  );
+  await expect(dialog.getByTestId("workspace-available-profiles")).toHaveCount(
+    0,
+  );
+  expect(writes).toEqual([]);
+});
+
+test("existing workspace compute details discard closed workspace stale responses", async ({
+  page,
+}) => {
+  let delayed: Route | undefined;
+  await page.route(
+    (url) => url.pathname === "/api/local/workspaces",
+    (route) =>
+      route.fulfill({
+        json: {
+          records: [
+            initial.workspaces[0],
+            { ...initial.workspaces[0], id: "ws-b", profile: "cpu-b" },
+          ],
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) => {
+      const workspace = new URL(route.request().url()).searchParams.get(
+        "workspace",
+      );
+      if (workspace === "ws-a") {
+        delayed = route;
+        return;
+      }
+      return route.fulfill({
+        json: {
+          profiles:
+            workspace === "ws-b"
+              ? { "cpu-b": { kind: "interactive", enabled: true } }
+              : {},
+        },
+      });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "View workspace profile ws-a", exact: true })
+    .click();
+  await expect.poll(() => Boolean(delayed)).toBeTruthy();
+  await page
+    .getByRole("button", { name: "Close profile details", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "View workspace profile ws-b", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Workspace compute profile",
+  });
+  await expect(dialog.getByTestId("stored-workspace-profile")).toHaveText(
+    "cpu-b",
+  );
+  await expect(
+    dialog.getByTestId("workspace-available-profiles").locator("li"),
+  ).toHaveText(["cpu-b"]);
+  const oldResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).searchParams.get("workspace") === "ws-a",
+  );
+  await delayed!.fulfill({
+    json: {
+      profiles: { "stale-profile": { kind: "interactive", enabled: true } },
+    },
+  });
+  await oldResponse;
+  await expect(
+    dialog.getByTestId("workspace-available-profiles").locator("li"),
+  ).toHaveText(["cpu-b"]);
+  await expect(dialog.getByTestId("stored-profile-availability")).toHaveText(
+    "Available for this workspace",
+  );
+  expect(writes).toEqual([]);
+});
