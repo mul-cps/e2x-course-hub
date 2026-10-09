@@ -22,6 +22,7 @@ class WorkspaceRegistrationTests(unittest.IsolatedAsyncioTestCase):
         client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cit')
         current = {
             'workspace': 'workspace/old +&', 'source': 'cit',
+            'course_id': 'owned-course', 'term_id': 'owned-term',
             'owner': 'neutral-old', 'server': 'rtc-old',
             'namespace': 'cit-jhub', 'pod': 'preserved-old',
             'members': ['current-person'], 'profiles': ['cpu'],
@@ -86,3 +87,77 @@ class WorkspaceRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'namespace': 'jupyterhub', 'pod': 'preserved-old',
             'policy_hash': 'reviewed-hash',
         })
+
+    async def test_registration_context_comes_only_from_console_workspace(self):
+        for console in ('cps', 'cit'):
+            with self.subTest(console=console):
+                client = ComputePolicyClient('https://internal.example', 'fixture-token', console)
+                workspace = {
+                    'id': 'qualified', 'group_id': 'owned-group',
+                    'course_id': 'owned-course', 'term_id': 'owned-term',
+                    'hub_user': 'neutral', 'hub_server': 'rtc',
+                    'namespace': 'trusted', 'pod': 'preserved',
+                    'profile': 'cpu', 'course_ceiling': {'cpu': '2'},
+                }
+                calls = []
+
+                class FakeHTTP:
+                    async def fetch(self, request):
+                        calls.append(request)
+                        return SimpleNamespace(body=b'{"registered":true}')
+
+                with patch('e2x_course_hub.cps.compute.AsyncHTTPClient', return_value=FakeHTTP()):
+                    await client.register_workspace(workspace, ['canonical-person'], {
+                        'policy_hash': 'reviewed-hash', 'course_id': 'foreign-course',
+                        'term_id': 'foreign-term', 'source': 'other-console',
+                    })
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].method, 'PUT')
+                self.assertEqual(calls[0].url, 'https://internal.example/internal/v1/workspaces')
+                self.assertEqual(json.loads(calls[0].body), {
+                    'workspace': 'qualified', 'group_id': 'owned-group',
+                    'course_id': 'owned-course', 'term_id': 'owned-term',
+                    'owner': 'neutral', 'server': 'rtc', 'members': ['canonical-person'],
+                    'principal': 'workspace:' + console + ':qualified', 'profiles': ['cpu'],
+                    'ceiling': {'cpu': '2'}, 'namespace': 'trusted', 'pod': 'preserved',
+                    'policy_hash': 'reviewed-hash',
+                })
+
+    async def test_legacy_registration_omits_incomplete_course_context(self):
+        for context in ({}, {'course_id': 'owned-course'},
+                        {'course_id': 'owned-course', 'term_id': None}):
+            with self.subTest(context=context):
+                client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+                client._request = AsyncMock(return_value={'registered': True})
+                await client.register_workspace({
+                    'id': 'legacy', 'hub_user': 'neutral', 'hub_server': 'rtc',
+                    'namespace': 'trusted', 'pod': 'preserved',
+                    'profile': 'cpu', 'course_ceiling': {}, **context,
+                }, ['canonical-person'], {'policy_hash': 'reviewed-hash',
+                                         'course_id': 'forged', 'term_id': 'forged'})
+                payload = client._request.await_args.args[2]
+                self.assertNotIn('course_id', payload)
+                self.assertNotIn('term_id', payload)
+
+    async def test_malformed_term_scoped_context_never_reaches_gateway(self):
+        contexts = [
+            {'term_id': 'owned-term'},
+            {'course_id': '', 'term_id': 'owned-term'},
+            {'course_id': True, 'term_id': 'owned-term'},
+            {'course_id': 'c' * 129, 'term_id': 'owned-term'},
+            {'course_id': 'owned-course', 'term_id': ''},
+            {'course_id': 'owned-course', 'term_id': False},
+            {'course_id': 'owned-course', 'term_id': ['owned-term']},
+            {'course_id': 'owned-course', 'term_id': 't' * 129},
+        ]
+        for context in contexts:
+            with self.subTest(context=context):
+                client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+                client._request = AsyncMock()
+                with self.assertRaisesRegex(ValueError, 'course_id and term_id'):
+                    await client.register_workspace({
+                        'id': 'invalid', 'hub_user': 'neutral', 'hub_server': 'rtc',
+                        'namespace': 'trusted', 'pod': 'preserved',
+                        'profile': 'cpu', 'course_ceiling': {}, **context,
+                    }, ['canonical-person'], {'policy_hash': 'reviewed-hash'})
+                client._request.assert_not_awaited()

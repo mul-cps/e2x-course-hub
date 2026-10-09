@@ -215,6 +215,23 @@ class HandlersTest(AsyncHTTPTestCase):
         self.groups=['lms.course.another.term.t.instructor']
         self.assertEqual(self.fetch('/workspace/w/start',method='POST',body='{}').code,403)
 
+    def test_start_rejects_browser_course_and_term_overrides(self):
+        async def seed():
+            await self.provider.put('courses', {'id': 'c'}, actor='admin')
+            await self.provider.put('terms', {'id': 'term', 'course_id': 'c', 'term_id': 't'}, actor='admin')
+            await self.provider.put('groups', {'id': 'g', 'course_id': 'c', 'term_id': 't'}, actor='admin')
+            await self.provider.put('workspaces', {
+                'id': 'w', 'course_id': 'c', 'term_id': 't', 'group_id': 'g', 'state': 'stopped',
+            }, actor='admin')
+        self.io_loop.run_sync(seed)
+        for body in ({'course_id': 'foreign'}, {'term_id': 'foreign'},
+                     {'course_id': 'foreign', 'term_id': 'foreign'}):
+            with self.subTest(body=body):
+                response = self.fetch('/workspace/w/start', method='POST', body=json.dumps(body))
+                self.assertEqual(response.code, 400)
+                record = self.io_loop.run_sync(lambda: self.provider.list('workspaces'))[0]
+                self.assertEqual((record['course_id'], record['term_id'], record['state']), ('c', 't', 'stopped'))
+
     def test_every_http_mutation_audits_invalid_json_delete_denial_and_hub_failure(self):
         async def seed():
             await self.provider.put('courses',{'id':'c'},actor='admin')

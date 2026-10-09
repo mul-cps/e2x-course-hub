@@ -36,6 +36,15 @@ class ComputePolicyClient:
         required = ('namespace', 'pod')
         if any(not workspace.get(key) for key in required):
             raise ValueError('Operator-qualified namespace and preserved Pod name required')
+        context = {}
+        # Legacy local workspaces may have a course without a term. Emit the
+        # qualified pair only from the owning console's stored workspace.
+        if workspace.get('term_id') is not None:
+            keys = ('course_id', 'term_id')
+            if any(not isinstance(workspace.get(key), str) or
+                   not 1 <= len(workspace[key]) <= 128 for key in keys):
+                raise ValueError('course_id and term_id must be nonempty strings of at most 128 characters')
+            context = {key: workspace[key] for key in keys}
         return await self._request('workspaces', 'PUT', {
             'workspace': workspace['id'], 'owner': workspace['hub_user'],
             'server': workspace['hub_server'], 'members': members,
@@ -43,6 +52,7 @@ class ComputePolicyClient:
             'profiles': [workspace['profile']], 'ceiling': workspace['course_ceiling'],
             'namespace': workspace['namespace'], 'pod': workspace['pod'],
             'policy_hash': validation['policy_hash'],
+            **context,
             **({'group_id': workspace['group_id']} if 'group_id' in workspace else {})})
 
     async def reservation_state(self, workspace):

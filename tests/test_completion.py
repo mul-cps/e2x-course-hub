@@ -84,6 +84,38 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls,['validate','register','provision','validate','sync','spawn','shares'])
         self.assertEqual((await self.provider.members('c'))[0]['person_id'],'unchanged')
 
+    async def test_start_registers_course_term_from_source_owned_workspace(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        await self.provider.put('terms', {'id': 'owned-term', 'course_id': 'c', 'term_id': 't'}, actor='admin')
+        await self.provider.put('workspaces', {
+            'id': 'qualified', 'course_id': 'c', 'term_id': 't', 'group_id': 'g',
+            'hub_user': 'neutral', 'hub_server': 'rtc', 'profile': 'cpu',
+        }, actor='admin')
+        registrations = []
+
+        class FakeHTTP:
+            async def fetch(self, request):
+                if request.method == 'PUT':
+                    registrations.append(json.loads(request.body))
+                    result = registrations[-1]
+                elif request.method == 'GET':
+                    result = registrations[-1]
+                else:
+                    result = {'policy_hash': 'hash', 'course_id': 'foreign', 'term_id': 'foreign'}
+                return SimpleNamespace(body=json.dumps(result).encode())
+
+        self.service.compute = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+        self.hub.start = AsyncMock()
+        with patch('e2x_course_hub.cps.compute.AsyncHTTPClient', return_value=FakeHTTP()):
+            await self.service.start('qualified', actor='teacher')
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual((registrations[0]['course_id'], registrations[0]['term_id']), ('c', 't'))
+        self.assertEqual((registrations[0]['namespace'], registrations[0]['pod']), ('trusted', 'preserved'))
+        self.assertEqual(registrations[0]['principal'], 'workspace:cps:qualified')
+        self.assertEqual((await self.service.get('qualified'))['state'], 'running')
+
     async def test_failed_spawn_requires_matching_observed_release(self):
         self.spawn_failure=True;self.release_failure=True
         with self.assertRaises(TimeoutError):await self.service.start('w',actor='teacher')
