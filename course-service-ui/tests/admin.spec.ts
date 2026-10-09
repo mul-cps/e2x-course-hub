@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Route } from "@playwright/test";
 const initial = {
   courses: [
     {
@@ -495,6 +495,204 @@ test("workspace picker excludes batch and disabled profiles and explains CPU-onl
     path: "/tmp/cps-admin-ui-qa/workspace-editor.png",
     fullPage: true,
   });
+});
+
+test("native pilot profile is selectable only for the exact workspace scope", async ({
+  page,
+}) => {
+  const scopes: (string | null)[] = [];
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) => {
+      const workspace = new URL(route.request().url()).searchParams.get(
+        "workspace",
+      );
+      scopes.push(workspace);
+      return route.fulfill({
+        json: {
+          profiles: {
+            cpu: { kind: "interactive", enabled: true },
+            "interactive-shared-5": {
+              kind: "interactive",
+              enabled: false,
+              nativePilotWorkspace: "ws-b",
+            },
+            "batch-shared-5": {
+              kind: "batch",
+              enabled: false,
+              nativePilotWorkspace: "ws-b",
+            },
+            "interactive-shared-10": { kind: "interactive", enabled: false },
+          },
+        },
+      });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Create workspace", exact: true })
+    .click();
+  const picker = page.getByLabel("Compute profile", { exact: true });
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "cpu",
+  ]);
+  await page.getByLabel("Identifier", { exact: false }).fill("ws-b");
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "cpu",
+    "interactive-shared-5",
+  ]);
+  await page
+    .getByRole("dialog")
+    .getByLabel(/^Course/)
+    .selectOption("ml");
+  await page.getByLabel(/^Term/).selectOption("ss26");
+  await page.getByLabel(/^Group/).selectOption("team-a");
+  await picker.selectOption("interactive-shared-5");
+  await page.getByRole("button", { name: "Save record" }).click();
+  await expect(
+    page.getByText("Shared workspaces saved successfully."),
+  ).toBeVisible();
+  expect(writes[0].body).toMatchObject({
+    id: "ws-b",
+    profile: "interactive-shared-5",
+  });
+  expect(scopes).toContain("ws-b");
+});
+
+test("late profile response cannot replace the current workspace scope", async ({
+  page,
+}) => {
+  let oldRequest: Route | undefined;
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    async (route) => {
+      const workspace = new URL(route.request().url()).searchParams.get(
+        "workspace",
+      );
+      if (workspace === "old-workspace") {
+        oldRequest = route;
+        return;
+      }
+      await route.fulfill({
+        json: {
+          profiles: {
+            cpu: { kind: "interactive", enabled: true },
+            ...(workspace === "new-workspace"
+              ? {
+                  "interactive-shared-5": {
+                    kind: "interactive",
+                    enabled: false,
+                    nativePilotWorkspace: workspace,
+                  },
+                }
+              : {}),
+          },
+        },
+      });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Create workspace", exact: true })
+    .click();
+  const identifier = page.getByLabel("Identifier", { exact: false });
+  await identifier.fill("old-workspace");
+  await expect.poll(() => Boolean(oldRequest)).toBe(true);
+  await identifier.fill("new-workspace");
+  const picker = page.getByLabel("Compute profile", { exact: true });
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "cpu",
+    "interactive-shared-5",
+  ]);
+  const oldResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).searchParams.get("workspace") === "old-workspace",
+  );
+  await oldRequest!.fulfill({
+    json: {
+      profiles: {
+        "stale-cpu": { kind: "interactive", enabled: true },
+        "interactive-shared-old": {
+          kind: "interactive",
+          enabled: false,
+          nativePilotWorkspace: "old-workspace",
+        },
+      },
+    },
+  });
+  await (await oldResponse).finished();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "cpu",
+    "interactive-shared-5",
+  ]);
+});
+
+test("changing workspace identifier prevents saving its previous pilot profile", async ({
+  page,
+}) => {
+  await page.route(
+    (url) => url.pathname === "/api/compute",
+    (route) => {
+      const workspace = new URL(route.request().url()).searchParams.get(
+        "workspace",
+      );
+      return route.fulfill({
+        json: {
+          profiles: {
+            cpu: { kind: "interactive", enabled: true },
+            ...(workspace === "ws-b"
+              ? {
+                  "interactive-shared-5": {
+                    kind: "interactive",
+                    enabled: false,
+                    nativePilotWorkspace: workspace,
+                  },
+                }
+              : {}),
+          },
+        },
+      });
+    },
+  );
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Create workspace", exact: true })
+    .click();
+  await page.getByLabel("Identifier", { exact: false }).fill("ws-b");
+  const picker = page.getByLabel("Compute profile", { exact: true });
+  await picker.selectOption("interactive-shared-5");
+  await page
+    .getByRole("dialog")
+    .getByLabel(/^Course/)
+    .selectOption("ml");
+  await page.getByLabel(/^Term/).selectOption("ss26");
+  await page.getByLabel(/^Group/).selectOption("team-a");
+  await page.getByLabel("Identifier", { exact: false }).fill("other-workspace");
+  await expect(picker.locator("option")).toHaveText([
+    "Select compute profile",
+    "cpu",
+  ]);
+  // The draft retains its previous selection, so the save guard must reject it.
+  await picker.evaluate((element) => {
+    const option = document.createElement("option");
+    option.value = "interactive-shared-5";
+    option.textContent = "interactive-shared-5";
+    (element as HTMLSelectElement).append(option);
+    (element as HTMLSelectElement).value = option.value;
+  });
+  await page.getByRole("button", { name: "Save record" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
+    "Select an available interactive profile.",
+  );
+  expect(writes).toEqual([]);
 });
 
 test("mobile dialog stays in viewport and background is inert until close", async ({

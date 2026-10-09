@@ -61,6 +61,10 @@ class ComputePolicyClient:
             payload['principal'] = 'workspace:' + self.console + ':' + workspace
             path = 'workspace-policy/preview'
         else:
-            payload.update(principal=registration['principal'], policy_hash=registration['policy_hash'])
+            # Provisioning updates the central document with verified storage.
+            # Validate that current registration, including its exact Hub/Pod
+            # binding, rather than the earlier PUT response or local draft.
+            current = await self._request('workspaces/' + quote(workspace, safe=''))
+            payload = {**current, 'profile': profile}
             path = 'workspace-policy'
         return await self._request(path, 'POST', payload)

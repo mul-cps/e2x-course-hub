@@ -1,6 +1,7 @@
 """Authenticated console operations. Central policy remains the resource authority."""
 import sqlite3
 import json
+from urllib.parse import urlencode
 from tornado import web
 from tornado.httpclient import HTTPClientError
 from .handlers import RecordsHandler
@@ -14,7 +15,10 @@ class ComputeHandler(RecordsHandler):
         if client is None: raise web.HTTPError(503,reason='Shared compute service not configured')
         person = self.get_argument('person',None)
         if person: self.write({'grants':await client.grants(person)})
-        else: self.write({'profiles':await client._request('profiles')})
+        else:
+            workspace = self.get_argument('workspace',None)
+            path = 'profiles' + ('?' + urlencode({'workspace':workspace}) if workspace else '')
+            self.write({'profiles':await client._request(path)})
 
     @web.authenticated
     async def post(self):

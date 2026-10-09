@@ -307,7 +307,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     let active = true;
     const needed = [
       ...new Set([
-        ...fields[kind].flatMap((f) => (f.reference ? [f.reference] : [])),
+        ...fields[kind].flatMap((f) =>
+          f.reference && !(kind === "workspaces" && f.reference === "profiles")
+            ? [f.reference]
+            : [],
+        ),
         ...(kind === "workspaces" ? ["memberships"] : []),
       ]),
     ];
@@ -327,12 +331,37 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         }
       }),
     ).then((items) => {
-      if (active) setRefs(Object.fromEntries(items));
+      if (active)
+        setRefs((previous) => ({ ...previous, ...Object.fromEntries(items) }));
     });
     return () => {
       active = false;
     };
   }, [kind]);
+  const workspaceProfileScope =
+    kind === "workspaces" ? String(draft?.id ?? "") : "";
+  useEffect(() => {
+    if (kind !== "workspaces") return;
+    let active = true;
+    setRefs((previous) => ({ ...previous, profiles: [] }));
+    requests
+      .get(
+        `${config.apiUrl}/compute`,
+        workspaceProfileScope
+          ? { workspace: workspaceProfileScope }
+          : undefined,
+      )
+      .then((result) => {
+        if (active)
+          setRefs((previous) => ({ ...previous, profiles: rowsFrom(result) }));
+      })
+      .catch(() => {
+        if (active) setRefs((previous) => ({ ...previous, profiles: [] }));
+      });
+    return () => {
+      active = false;
+    };
+  }, [kind, workspaceProfileScope]);
   async function mutate(run: () => Promise<unknown>, message: string) {
     setBusy(true);
     setError("");
@@ -374,7 +403,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   }
   const workspaceProfiles = (refs.profiles ?? []).filter(
     (p) =>
-      p.enabled !== false &&
+      (p.enabled !== false ||
+        (workspaceProfileScope !== "" &&
+          p.nativePilotWorkspace === workspaceProfileScope)) &&
       (p.kind === "interactive" ||
         (p.kind == null && String(p.id).startsWith("interactive-"))),
   );
