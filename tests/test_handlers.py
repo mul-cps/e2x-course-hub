@@ -19,6 +19,7 @@ class HandlersTest(AsyncHTTPTestCase):
         self.groups = []
         self.hub_failure = False
         self.hub_users = {'admin': 'admin', 'old-name': 'old-name'}
+        self.compute_requests = []
         outer = self
         class Hub:
             async def get_user(self,name):
@@ -53,11 +54,19 @@ class HandlersTest(AsyncHTTPTestCase):
                 if outer.hub_failure:raise RuntimeError('Hub unavailable')
                 record=await self.get(identifier)
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
+        class ComputeClient:
+            async def _request(self, path):
+                outer.compute_requests.append(path)
+                return {'cpu': {'kind': 'interactive', 'enabled': True}}
+            async def grants(self, person):
+                outer.compute_requests.append(('grants', person))
+                return []
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
             (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
             (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
-            compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
+            compute_gateway_url='https://gateway.example',compute_policy=ComputeClient(),
+            console_owner='cps',cookie_secret='test')
 
     def tearDown(self):
         self.provider.db.close()
@@ -78,6 +87,17 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual([c.headers['X-CPS-Hub'] for c in calls],['cps','cps'])
         self.assertEqual([c.headers['Idempotency-Key'] for c in calls],['request-alice','request-bob'])
         self.assertTrue(all(c.url=='https://gateway.example/v1/me' for c in calls))
+
+    def test_compute_profiles_forward_only_the_encoded_workspace_scope(self):
+        response = self.fetch('/compute?workspace=native%3Aa%2Fb+%2B%26%3F&enabled=true')
+        self.assertEqual(response.code, 200)
+        self.assertEqual(self.compute_requests, ['profiles?workspace=native%3Aa%2Fb+%2B%26%3F'])
+        self.assertIn('cpu', json.loads(response.body)['profiles'])
+
+    def test_compute_profiles_without_scope_and_person_lookup_keep_existing_behavior(self):
+        self.assertEqual(self.fetch('/compute').code, 200)
+        self.assertEqual(self.fetch('/compute?person=alice&workspace=native').code, 200)
+        self.assertEqual(self.compute_requests, ['profiles', ('grants', 'alice')])
 
     def test_admin_reviewed_alias_works_without_verifying_email_and_uses_authenticated_actor(self):
         row={'hub':'cps','username':'old-name','person_id':'00000000-0000-4000-8000-000000000001',
