@@ -609,7 +609,7 @@ role_rows AS (
   UNION ALL SELECT 'schema',nspname,nspowner,coalesce(nspacl,acldefault('n',nspowner))
     FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema'
   UNION ALL SELECT 'relation',n.nspname||'.'||c.relname,c.relowner,
-    coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S' ELSE 'r' END::"char",c.relowner))
+    coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's' ELSE 'r' END::"char",c.relowner))
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
       AND c.relkind IN ('r','p','v','m','S','f')

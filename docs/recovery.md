@@ -40,6 +40,10 @@ The default-ACL object type is an internal `char` field in
 [PostgreSQL 18](https://www.postgresql.org/docs/18/catalog-pg-default-acl.html).
 The query casts it to text before concatenation, preserving its one-character
 code without an ambiguous operator overload.
+Sequence relations retain catalog kind `S`; their default privileges use
+`acldefault('s', owner)`, as documented for
+[PostgreSQL 15](https://www.postgresql.org/docs/15/functions-info.html) and
+[PostgreSQL 18](https://www.postgresql.org/docs/18/functions-info.html).
 
 ```sh
 python -m e2x_course_hub.cps.recovery postgres-sql --execute \

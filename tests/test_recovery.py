@@ -69,7 +69,9 @@ class RoleCatalogTests(unittest.TestCase):
                 match = re.search(r'acldefault\((CASE .+? END)::"char",c.relowner\)', sql)
                 self.assertIsNotNone(match)
                 observed = list(db.execute('SELECT ' + match[1] + ' FROM pg_class c ORDER BY c.oid'))
-                self.assertEqual(observed, [('r',), ('S',), ('r',)])
+                # acldefault uses lower-case s for SEQUENCE, while its upper-
+                # case S denotes FOREIGN SERVER. pg_class.relkind remains S.
+                self.assertEqual(observed, [('r',), ('s',), ('r',)])
 
     def test_default_acl_kind_concatenation_has_explicit_text_type_and_preserves_codes(self):
         for source in ('cps', 'cit'):
