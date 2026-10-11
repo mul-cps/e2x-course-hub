@@ -1,7 +1,14 @@
 """Server-only shared policy client. Tokens must never enter rendered config."""
 import json
 from urllib.parse import quote, urlsplit
-from tornado.httpclient import AsyncHTTPClient, HTTPRequest
+from tornado.httpclient import AsyncHTTPClient, HTTPRequest, HTTPClientError
+
+
+class NativeCleanupPending(HTTPClientError):
+    """A scoped gateway response: shutdown verified, node cleanup not published."""
+    def __init__(self, workspace, attempt, *, response=None):
+        super().__init__(409, 'Native GPU cleanup pending; reservations retained', response=response)
+        self.workspace, self.attempt = workspace, attempt
 
 class ComputePolicyClient:
     def __init__(self, base_url, token, console):
@@ -63,7 +70,34 @@ class ComputePolicyClient:
             raise ValueError('Hub shutdown confirmation required')
         # Hub post-stop owns the persisted attempt. This idempotent probe cannot
         # force-release its reservation; the gateway observes actual Pod absence.
-        return await self._request('reservations/release', 'POST', {'workspace': workspace, 'attempt': attempt})
+        try:
+            return await self._request('reservations/release', 'POST', {'workspace': workspace, 'attempt': attempt})
+        except HTTPClientError as error:
+            raw = getattr(error.response, 'body', None)
+            if error.code != 409 or not isinstance(raw, (bytes, str)) or len(raw) > 8192:
+                raise
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('Duplicate cleanup response field')
+                    result[key] = value
+                return result
+            def reject_constant(value):
+                raise ValueError('Nonfinite cleanup response value')
+            try:
+                body = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+            except (ValueError, UnicodeError):
+                raise error from None
+            detail = body.get('detail') if isinstance(body, dict) else None
+            if (isinstance(body, dict) and set(body) == {'detail'}
+                    and isinstance(detail, dict) and set(detail) == {'version', 'code', 'workspace', 'attempt'}
+                    and type(detail['version']) is int and detail['version'] == 1
+                    and detail['code'] == 'native_cleanup_pending'
+                    and isinstance(attempt, str) and bool(attempt)
+                    and detail['workspace'] == workspace and detail['attempt'] == attempt):
+                raise NativeCleanupPending(workspace, attempt, response=error.response) from None
+            raise
 
     async def validate_workspace(self, workspace, members, profile, ceiling, registration=None):
         payload = {'workspace': workspace, 'members': members, 'profile': profile, 'ceiling': ceiling}

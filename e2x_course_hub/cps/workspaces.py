@@ -1,10 +1,12 @@
 """Service-controlled shared GPU workspace lifecycle and access reconciliation."""
 import asyncio
 import json
+import math
 from functools import wraps
 from contextlib import AsyncExitStack
 from urllib.parse import quote
 from tornado.httpclient import HTTPClientError
+from .compute import NativeCleanupPending
 
 def audited_lifecycle(method):
     @wraps(method)
@@ -131,11 +133,15 @@ class UnconfiguredFilesystemAdapter:
 
 
 class WorkspaceService:
-    def __init__(self, provider, compute, hub, *, filesystem=None):
+    def __init__(self, provider, compute, hub, *, filesystem=None, native_cleanup_timeout=60):
+        if (type(native_cleanup_timeout) not in (int, float)
+                or not math.isfinite(native_cleanup_timeout) or not 0 < native_cleanup_timeout <= 120):
+            raise ValueError('Native cleanup wait must be finite and at most 120 seconds')
         self.provider, self.compute, self.hub = provider,compute,hub
         self.locks = {}
         self.course_locks = {}
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
+        self.native_cleanup_timeout = native_cleanup_timeout
 
     async def get(self, identifier):
         for record in await self.provider.list('workspaces'):
@@ -198,7 +204,7 @@ class WorkspaceService:
                 raise ValueError('Course reconciliation barrier is unresolved; reconcile every writer before restart')
             siblings = [w for w in await self.provider.list('workspaces')
                         if w.get('course_id') == workspace['course_id'] and w.get('group_id') == workspace['group_id']]
-            if any(w.get('state') in ('reconciling','starting') for w in siblings):
+            if any(w.get('state') in ('reconciling','starting','stopping') for w in siblings):
                 raise ValueError('Shared group has an unresolved lifecycle')
             if not course or course.get('resource_ceiling') is None:
                 raise ValueError('Administrator-controlled course resource ceiling required')
@@ -293,11 +299,57 @@ class WorkspaceService:
             workspace = await self.get(identifier)
             reservation = await self.compute.reservation_state(identifier)
             await self.hub.stop_confirmed(workspace)
-            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=reservation.get("attempt"))
+            workspace = await self._release_after_cleanup(workspace, actor=actor,
+                attempt=reservation.get('attempt'), archive=archive)
             # No filesystem permission claim: external archive operation must stop all other writers too.
             await self.hub.revoke_shares(workspace)
             await self.provider.put('workspaces',{**workspace,'state':'stopped','notice':None,
                 'archive_pending':archive or workspace.get('archive_pending',False)},actor=actor)
+
+    async def _release_after_cleanup(self, workspace, *, actor, attempt, archive):
+        identifier = workspace['id']
+        try:
+            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=attempt)
+            return workspace
+        except NativeCleanupPending as error:
+            if error.workspace != identifier or error.attempt != attempt:
+                raise
+        # This normal CRUD commits before sleeping. Hold only the workspace's
+        # lifecycle lock; a pending Stop cannot admit another Start.
+        pending = await self.provider.put('workspaces', {**workspace, 'state':'stopping',
+            'notice':'Hub server stopped; native GPU cleanup is pending, reservations retained. Stop cannot finish until trusted cleanup is confirmed.',
+            'archive_pending':archive or workspace.get('archive_pending',False)}, actor=actor)
+        deadline = asyncio.get_running_loop().time() + self.native_cleanup_timeout
+
+        async def recheck():
+            if await self.get(identifier) != pending:
+                raise ValueError('Workspace changed during native cleanup wait')
+            await self.hub.assert_stopped(pending)
+            reservation = await self.compute.reservation_state(identifier)
+            if (not isinstance(reservation,dict) or type(reservation.get('active')) is not bool
+                    or (reservation['active'] and reservation.get('attempt') != attempt)
+                    or (not reservation['active'] and reservation.get('attempt') is not None)):
+                raise ValueError('Reservation attempt changed during native cleanup wait')
+            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=attempt)
+            if await self.get(identifier) != pending:
+                raise ValueError('Workspace changed during native cleanup confirmation')
+
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError('Trusted native GPU cleanup is unconfirmed; reservations retained. Retry Stop to recheck cleanup.')
+            await asyncio.sleep(min(0.2, remaining))
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError('Trusted native GPU cleanup is unconfirmed; reservations retained. Retry Stop to recheck cleanup.')
+            try:
+                await asyncio.wait_for(recheck(), remaining)
+                return pending
+            except NativeCleanupPending as error:
+                if error.workspace != identifier or error.attempt != attempt:
+                    raise
+            except TimeoutError:
+                raise TimeoutError('Trusted native GPU cleanup is unconfirmed; reservations retained. Retry Stop to recheck cleanup.') from None
 
     @audited_lifecycle
     @course_serialized
