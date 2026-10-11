@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import threading
@@ -25,6 +26,67 @@ def write(path, value):
 
 
 class RoleCatalogTests(unittest.TestCase):
+    def test_catalog_character_fields_preserve_schema_and_acl_classification(self):
+        # Execute the generated catalog projection, with documented PG15/18
+        # character values. SQLite exercises the projection rather than PG's
+        # overload resolver; the default-ACL test separately fences that cast.
+        for source in ('cps', 'cit'):
+            with self.subTest(source=source), closing(sqlite3.connect(':memory:')) as db:
+                db.create_function('jsonb_build_array', -1, lambda *values: json.dumps(values))
+                db.create_function('pg_get_viewdef', 2, lambda *_: 'SELECT 1')
+                db.create_function('format_type', 2, lambda *_: 'integer')
+                db.create_function('pg_get_expr', 2, lambda *_: '1')
+                db.execute('CREATE TABLE pg_namespace (oid INTEGER,nspname TEXT)')
+                db.execute('INSERT INTO pg_namespace VALUES (1,\'app\')')
+                db.execute('CREATE TABLE pg_class (oid INTEGER,relnamespace INTEGER,relname TEXT,relkind CHAR,relpersistence CHAR,relowner INTEGER)')
+                db.executemany('INSERT INTO pg_class VALUES (?,?,?,?,?,?)', [
+                    (10, 1, 'table', 'r', 'p', 11), (20, 1, 'sequence', 'S', 't', 11),
+                    (30, 1, 'view', 'v', 'u', 11)])
+                db.execute('CREATE TABLE pg_attribute (attrelid INTEGER,attnum INTEGER,attname TEXT,atttypid INTEGER,atttypmod INTEGER,attnotnull BOOLEAN,attidentity CHAR,attgenerated CHAR,attisdropped BOOLEAN)')
+                db.executemany('INSERT INTO pg_attribute VALUES (?,?,?,?,?,?,?,?,?)', [
+                    (10, 1, 'plain', 23, -1, 0, '', '', 0),
+                    (10, 2, 'identity', 23, -1, 1, 'a', '', 0),
+                    (10, 3, 'generated', 23, -1, 0, '', 's', 0),
+                    (10, 4, 'deleted', 23, -1, 0, 'd', '', 1)])
+                db.execute('CREATE TABLE pg_attrdef (adrelid INTEGER,adnum INTEGER,adbin TEXT)')
+                db.execute('CREATE TABLE pg_constraint (conrelid INTEGER,conname TEXT,oid INTEGER)')
+                db.execute('CREATE TABLE pg_index (indrelid INTEGER,indexrelid INTEGER)')
+                db.create_function('pg_get_constraintdef', 2, lambda *_: 'unused')
+                db.create_function('pg_get_indexdef', 1, lambda *_: 'unused')
+                sql = recovery.postgres_fingerprint_sql(source)
+                projection = sql.split('schema_rows AS (\n', 1)[1].split('), table_rows AS (', 1)[0]
+                observed = [json.loads(row[0]) for row in db.execute(
+                    'WITH schema_rows AS (' + projection + ') SELECT row FROM schema_rows')]
+                self.assertCountEqual(observed, [
+                    ['relation', 'app', 'table', 'r', 'p', None],
+                    ['relation', 'app', 'sequence', 'S', 't', None],
+                    ['relation', 'app', 'view', 'v', 'u', 'SELECT 1'],
+                    ['column', 'app', 'table', 1, 'plain', 'integer', 0, '', '', '1'],
+                    ['column', 'app', 'table', 2, 'identity', 'integer', 1, 'a', '', '1'],
+                    ['column', 'app', 'table', 3, 'generated', 'integer', 0, '', 's', '1']])
+                # The other internal-char expression selects acldefault's
+                # single-byte object type; it must stay explicitly typed.
+                match = re.search(r'acldefault\((CASE .+? END)::"char",c.relowner\)', sql)
+                self.assertIsNotNone(match)
+                observed = list(db.execute('SELECT ' + match[1] + ' FROM pg_class c ORDER BY c.oid'))
+                self.assertEqual(observed, [('r',), ('S',), ('r',)])
+
+    def test_default_acl_kind_concatenation_has_explicit_text_type_and_preserves_codes(self):
+        for source in ('cps', 'cit'):
+            with self.subTest(source=source), closing(sqlite3.connect(':memory:')) as db:
+                sql = recovery.postgres_fingerprint_sql(source)
+                match = re.search(r"UNION ALL SELECT (.+?),coalesce\(n.nspname,'\*'\)", sql)
+                self.assertIsNotNone(match)
+                expression = match[1]
+                # PostgreSQL cannot choose a unique unknown || internal-char
+                # overload. Require a text operand, then execute its projection.
+                self.assertRegex(expression, r"^'default:'\|\|d\.defaclobjtype::text$")
+                db.execute('CREATE TABLE pg_default_acl (defaclobjtype CHAR)')
+                db.executemany('INSERT INTO pg_default_acl VALUES (?)', [('r',), ('S',), ('f',), ('T',), ('n',), ('L',)])
+                expression = expression.replace('d.defaclobjtype::text', 'CAST(d.defaclobjtype AS TEXT)')
+                observed = [row[0] for row in db.execute('SELECT ' + expression + ' FROM pg_default_acl d')]
+                self.assertEqual(observed, ['default:r', 'default:S', 'default:f', 'default:T', 'default:n', 'default:L'])
+
     def test_generated_role_projection_uses_private_attributes_and_global_view_settings(self):
         # PG15/18 pg_authid has no rolconfig; pg_roles adds global settings
         # and masks its password. Execute the generated relational projection

@@ -35,6 +35,12 @@ those remain a separate comparison. The catalog layout is documented for
 [PostgreSQL 15](https://www.postgresql.org/docs/15/view-pg-roles.html) and
 [PostgreSQL 18](https://www.postgresql.org/docs/18/view-pg-roles.html).
 
+The default-ACL object type is an internal `char` field in
+[PostgreSQL 15](https://www.postgresql.org/docs/15/catalog-pg-default-acl.html) and
+[PostgreSQL 18](https://www.postgresql.org/docs/18/catalog-pg-default-acl.html).
+The query casts it to text before concatenation, preserving its one-character
+code without an ambiguous operator overload.
+
 ```sh
 python -m e2x_course_hub.cps.recovery postgres-sql --execute \
   --source cps --output /PRIVATE/cps-source-fingerprint.sql

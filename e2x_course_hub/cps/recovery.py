@@ -617,7 +617,7 @@ role_rows AS (
     p.proowner,coalesce(p.proacl,acldefault('f',p.proowner)) FROM pg_proc p
     JOIN pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
-  UNION ALL SELECT 'default:'||d.defaclobjtype,coalesce(n.nspname,'*'),d.defaclrole,d.defaclacl
+  UNION ALL SELECT 'default:'||d.defaclobjtype::text,coalesce(n.nspname,'*'),d.defaclrole,d.defaclacl
     FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace
 ), acl_rows AS (
   SELECT jsonb_build_array(o.kind,o.name,r.rolname,coalesce(g.rolname,'PUBLIC'),
