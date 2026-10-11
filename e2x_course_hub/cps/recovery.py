@@ -592,9 +592,10 @@ BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL timezone = 'UTC';
 WITH excluded AS (SELECT EXCLUDED AS name),
 role_rows AS (
-  SELECT jsonb_build_array(rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,
-    rolcanlogin,rolreplication,rolconnlimit,rolpassword,rolvaliduntil,rolbypassrls,rolconfig) AS row
-  FROM pg_authid WHERE rolname IS DISTINCT FROM (SELECT name FROM excluded)
+  SELECT jsonb_build_array(a.rolname,a.rolsuper,a.rolinherit,a.rolcreaterole,a.rolcreatedb,
+    a.rolcanlogin,a.rolreplication,a.rolconnlimit,a.rolpassword,a.rolvaliduntil,a.rolbypassrls,r.rolconfig) AS row
+  FROM pg_authid a JOIN pg_roles r ON r.oid=a.oid
+  WHERE a.rolname IS DISTINCT FROM (SELECT name FROM excluded)
 ), member_rows AS (
   SELECT jsonb_build_array(r.rolname,m.rolname,g.rolname,a.admin_option,
     to_jsonb(a)->'inherit_option',to_jsonb(a)->'set_option') AS row

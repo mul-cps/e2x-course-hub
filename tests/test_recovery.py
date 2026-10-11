@@ -1,10 +1,12 @@
 """Recovery contract tests use real SQLite and loopback HTTP, never cluster APIs."""
 import copy
+from contextlib import closing
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -20,6 +22,51 @@ def write(path, value):
     path.write_bytes(value if isinstance(value, bytes) else json.dumps(value).encode())
     path.chmod(0o600)
     return str(path)
+
+
+class RoleCatalogTests(unittest.TestCase):
+    def test_generated_role_projection_uses_private_attributes_and_global_view_settings(self):
+        # PG15/18 pg_authid has no rolconfig; pg_roles adds global settings
+        # and masks its password. Execute the generated relational projection
+        # against those documented column sets, without a PostgreSQL process.
+        columns = ('oid INTEGER,rolname TEXT,rolsuper BOOLEAN,rolinherit BOOLEAN,'
+                   'rolcreaterole BOOLEAN,rolcreatedb BOOLEAN,rolcanlogin BOOLEAN,'
+                   'rolreplication BOOLEAN,rolconnlimit INTEGER,rolpassword TEXT,'
+                   'rolvaliduntil TEXT,rolbypassrls BOOLEAN')
+        private_rows = [
+            (11, 'app', 0, 1, 0, 0, 1, 0, -1, 'private-authid-value', None, 0),
+            (22, 'restore_0123456789abcdef', 1, 1, 1, 1, 1, 0, -1, 'bootstrap-only', None, 0),
+            (33, 'restore_ffffffffffffffff', 0, 1, 0, 0, 1, 0, -1, None, None, 0),
+        ]
+        expected = [
+            ['app', 0, 1, 0, 0, 1, 0, -1, 'private-authid-value', None, 0, 'search_path=app,public'],
+            ['restore_0123456789abcdef', 1, 1, 1, 1, 1, 0, -1, 'bootstrap-only', None, 0, None],
+            ['restore_ffffffffffffffff', 0, 1, 0, 0, 1, 0, -1, None, None, 0, None],
+        ]
+        for source in ('cps', 'cit'):
+            for bootstrap in (None, 'restore_0123456789abcdef'):
+                with self.subTest(source=source, bootstrap=bootstrap), closing(sqlite3.connect(':memory:')) as db:
+                    db.create_function('jsonb_build_array', -1, lambda *values: json.dumps(values))
+                    db.execute('CREATE TABLE pg_authid (' + columns + ')')
+                    db.execute('CREATE TABLE pg_roles (' + columns + ',rolconfig TEXT)')
+                    db.executemany('INSERT INTO pg_authid VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', private_rows)
+                    for index, row in enumerate(private_rows):
+                        # OID joins, rather than view row order, bind the config.
+                        public = list(row)
+                        public[9] = '********'
+                        public.append('search_path=app,public' if index == 0 else None)
+                        db.execute('INSERT INTO pg_roles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', public)
+                    sql = recovery.postgres_fingerprint_sql(source, bootstrap)
+                    begin = sql.index('WITH excluded AS (')
+                    end = sql.index('), member_rows AS (') + 1
+                    # Only PostgreSQL's scalar cast syntax needs translation.
+                    projection = sql[begin:end].replace('::text', '') + ' SELECT row FROM role_rows;'
+                    try:
+                        observed = [json.loads(row[0]) for row in db.execute(projection)]
+                    except sqlite3.OperationalError as error:
+                        self.fail('Generated role projection rejects the documented catalog: ' + str(error))
+                    wanted = expected if bootstrap is None else [expected[0], expected[2]]
+                    self.assertCountEqual(observed, wanted)
 
 
 class RecoveryTests(unittest.TestCase):

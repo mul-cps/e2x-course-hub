@@ -27,6 +27,14 @@ properties, exact role memberships, and resolved object ownership/ACLs.
 It requires the database administrator because it hashes `pg_authid` in place;
 role passwords are never emitted.
 
+Role properties use `pg_authid`, while role-global configuration defaults come
+from the same role's `pg_roles.rolconfig` view field. That view masks passwords,
+so the private `pg_authid.rolpassword` remains inside the aggregate hash. This
+captures global role defaults, not per-database `pg_db_role_setting` overrides;
+those remain a separate comparison. The catalog layout is documented for
+[PostgreSQL 15](https://www.postgresql.org/docs/15/view-pg-roles.html) and
+[PostgreSQL 18](https://www.postgresql.org/docs/18/view-pg-roles.html).
+
 ```sh
 python -m e2x_course_hub.cps.recovery postgres-sql --execute \
   --source cps --output /PRIVATE/cps-source-fingerprint.sql
