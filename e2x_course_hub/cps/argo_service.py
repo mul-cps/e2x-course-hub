@@ -339,6 +339,7 @@ class ArgoProxyHandler(ArgoHandler):
             raise web.HTTPError(405)
         if not is_api and not is_artifact:
             raise web.HTTPError(404)
+        object_request = is_artifact or path.startswith("api/v1/workflows/cps-workflows/")
         token = self.hub_auth.get_token(self)
         if not token:
             raise web.HTTPError(401)
@@ -354,7 +355,7 @@ class ArgoProxyHandler(ArgoHandler):
                               ca_certs=self.config.compute_ca_file,
                               request_timeout=STREAM_SECONDS if is_stream else (120 if is_artifact else 60))
         if is_stream or (is_artifact and self.request.method == "GET"):
-            await self._stream(request, artifact=is_artifact)
+            await self._stream(request, artifact=is_artifact, object_request=object_request)
             return
         try:
             response = await self._fetch_upstream(request)
@@ -362,6 +363,10 @@ class ArgoProxyHandler(ArgoHandler):
             return
         except HTTPClientError as error:
             raise web.HTTPError(502, reason="Compute service unavailable") from error
+        if object_request and response.code in (403, 404):
+            # Foreign and missing objects must disclose neither existence nor
+            # the downstream error body or its object-related headers.
+            raise web.HTTPError(404, reason="Resource not found")
         if 300 <= response.code < 400:
             raise web.HTTPError(502, reason="Upstream redirects are disabled")
         if len(response.body or b"") > MAX_RESPONSE_BYTES:
@@ -372,7 +377,7 @@ class ArgoProxyHandler(ArgoHandler):
                 self.set_header(name, response.headers[name])
         await self._finish_buffered(response.body)
 
-    async def _stream(self, request, *, artifact=False):
+    async def _stream(self, request, *, artifact=False, object_request=False):
         # Header inspection precedes chunk forwarding; error bodies, cookies,
         # redirect locations and authority-related headers never reach browsers.
         status = {"code": None, "type": None, "disposition": None, "length": None,
@@ -439,6 +444,8 @@ class ArgoProxyHandler(ArgoHandler):
                 self._abort_forward()
                 return
         else:
+            if object_request and response.code in (403, 404):
+                raise web.HTTPError(404, reason="Resource not found")
             if response.code != 200 or status["type"] not in allowed_types:
                 raise web.HTTPError(response.code if response.code in (401, 403, 404, 429) else 502,
                                     reason="Compute stream rejected")
