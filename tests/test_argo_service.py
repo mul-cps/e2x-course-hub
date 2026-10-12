@@ -65,7 +65,9 @@ class ConfigTest(unittest.TestCase):
                 {"compute_url": "http://compute.example"},
                 {"compute_url": "https://user:secret@compute.example"},
                 {"compute_url": "https://compute.example/another"},
-                {"native_argo_url": "https://native-argo.example/"},
+                {"native_argo_url": "https://native-argo.example/foreign"},
+                {"native_argo_url": "https://native-argo.example//"},
+                {"native_argo_url": "https://native-argo.example/argo//"},
                 {"public_origin": "https://hub.example/?target=evil"},
                 {"compute_ca_file": "/missing/ca"},
             ):
@@ -80,6 +82,22 @@ class ConfigTest(unittest.TestCase):
                 for name in candidate.__dataclass_fields__
             }, clear=True):
                 self.assertEqual(ArgoServiceConfig.from_env(), candidate)
+
+    def test_native_backend_accepts_reviewed_root_and_argo_paths(self):
+        with tempfile.NamedTemporaryFile() as ca:
+            candidate = config(ca.name)
+            for url, normalized in (
+                ("https://native-argo.example", "https://native-argo.example"),
+                ("https://native-argo.example/", "https://native-argo.example"),
+                ("https://native-argo.example:2746/", "https://native-argo.example:2746"),
+                ("https://native-argo.example/argo/", "https://native-argo.example/argo"),
+            ):
+                with self.subTest(url=url):
+                    try:
+                        actual = replace(candidate, native_argo_url=url)
+                    except ValueError as error:
+                        self.fail("reviewed native backend was rejected: " + str(error))
+                    self.assertEqual(actual.native_argo_url, normalized)
 
 
 class ArgoServiceTest(AsyncHTTPTestCase):
@@ -393,6 +411,25 @@ class ArgoServiceTest(AsyncHTTPTestCase):
         response = self.fetch("/argo/api/v1/info?fixture=redirect", headers=self.headers())
         self.assertEqual(response.code, 502)
         self.assertNotIn("Location", response.headers)
+
+    def test_root_native_backend_keeps_public_argo_prefix_and_strips_it_upstream(self):
+        try:
+            self._app.settings["argo_config"] = replace(
+                self._app.settings["argo_config"], native_argo_url="https://native-argo.example/")
+        except ValueError as error:
+            self.fail("reviewed root asset backend was rejected: " + str(error))
+        for path, expected in (
+            ("/argo/workflows", "https://native-argo.example/"),
+            ("/argo/main.123.js", "https://native-argo.example/main.123.js"),
+            ("/argo/assets/logo.svg", "https://native-argo.example/assets/logo.svg"),
+        ):
+            with self.subTest(path=path):
+                response = self.fetch(path, headers=self.headers(**{"Sec-Fetch-Mode": "no-cors"}))
+                self.assertEqual(response.code, 200)
+                self.assertEqual(self.outbound[-1].url, expected)
+                self.assertEqual(dict(self.outbound[-1].headers), {})
+                self.assertEqual(self.outbound[-1].ca_certs, self.ca.name)
+                self.assertFalse(self.outbound[-1].follow_redirects)
 
     def test_native_login_reauthorizes_with_canonical_return_target(self):
         response = self.fetch("/argo/login?redirect=https://evil.example", follow_redirects=False)

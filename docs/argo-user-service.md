@@ -92,7 +92,9 @@ writes. This bounds source-level capacity and buffering, but real slow-browser
 and concurrency load qualification remains required before production activation.
 
 Only fixed `.js`, `.css`, image and font asset paths and the reviewed workflow
-SPA routes are requested from the pinned native Argo backend at `/argo/`.
+SPA routes are requested from the pinned native Argo backend at its explicit
+root or `/argo` base path. The browser always retains the public `/argo/`
+prefix; a root backend receives `/main...js` for `/argo/main...js`.
 Asset requests carry no credential or browser header. `connect-src 'self'`
 prevents native UI connections to another authority. TLS certificate and
 hostname validation are always enabled for the Hub, compute and native asset
@@ -112,7 +114,7 @@ Every `ArgoServiceConfig` field can be supplied through an environment variable:
 | `ARGO_USER_HUB_API_URL` | Fixed existing Hub HTTPS API URL, ending in `/api` |
 | `ARGO_USER_HUB_AUTHORIZATION_URL` | Existing Hub HTTPS `/api/oauth2/authorize` URL |
 | `ARGO_USER_COMPUTE_URL` | Fixed HTTPS compute gateway origin, with no path |
-| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend URL ending in `/argo` |
+| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend URL at its root or `/argo` base path |
 | `ARGO_USER_HUB_CA_FILE` | Installed trusted CA bundle for the Hub API |
 | `ARGO_USER_COMPUTE_CA_FILE` | Installed trusted CA bundle for compute |
 | `ARGO_USER_NATIVE_ARGO_CA_FILE` | Installed trusted CA bundle for native Argo |
