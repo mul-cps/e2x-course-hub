@@ -215,6 +215,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     profiles: Row[];
     failed: boolean;
   }>({ workspace: "", loading: true, profiles: [], failed: false });
+  const [grantWorkspace, setGrantWorkspace] = useState("");
+  const [grantDiscovery, setGrantDiscovery] = useState<{
+    workspace: string;
+    loading: boolean;
+    profiles: Row[];
+    failed: boolean;
+  }>({ workspace: "", loading: false, profiles: [], failed: false });
   const [confirmation, setConfirmation] = useState<{
     message: string;
     run: () => Promise<void>;
@@ -327,6 +334,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
             : [],
         ),
         ...(kind === "workspaces" ? ["memberships"] : []),
+        ...(kind === "compute" && config.user.admin ? ["workspaces"] : []),
       ]),
     ];
     Promise.all(
@@ -352,6 +360,65 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       active = false;
     };
   }, [kind]);
+  const grantBaseProfiles = (refs.profiles ?? []).filter((profile) => {
+    const gpu = profile.gpu;
+    return (
+      !profile.nativeGroupWorkspace &&
+      !profile.nativePilotWorkspace &&
+      !(gpu && typeof gpu === "object" && (gpu as Row).mode !== "none") &&
+      !(typeof gpu === "string" && gpu !== "0") &&
+      !/^interactive-(shared|exclusive|native)-/.test(String(profile.id))
+    );
+  });
+  const grantProfiles = [
+    ...grantBaseProfiles,
+    ...(grantDiscovery.workspace === grantWorkspace &&
+    !grantDiscovery.loading &&
+    !grantDiscovery.failed
+      ? grantDiscovery.profiles.filter(
+          (profile) =>
+            profile.kind === "interactive" &&
+            profile.enabled === true &&
+            profile.nativeGroupWorkspace === grantWorkspace &&
+            (profile.gpu as Row | undefined)?.mode === "shared" &&
+            !grantBaseProfiles.some((base) => base.id === profile.id),
+        )
+      : []),
+  ];
+  const grantDialogOpen = kind === "compute" && draft !== null;
+  useEffect(() => {
+    if (!grantDialogOpen || !grantWorkspace) return;
+    let active = true;
+    setGrantDiscovery({
+      workspace: grantWorkspace,
+      loading: true,
+      profiles: [],
+      failed: false,
+    });
+    requests
+      .get(`${config.apiUrl}/compute`, { workspace: grantWorkspace })
+      .then((result) => {
+        if (active)
+          setGrantDiscovery({
+            workspace: grantWorkspace,
+            loading: false,
+            profiles: rowsFrom(result),
+            failed: false,
+          });
+      })
+      .catch(() => {
+        if (active)
+          setGrantDiscovery({
+            workspace: grantWorkspace,
+            loading: false,
+            profiles: [],
+            failed: true,
+          });
+      });
+    return () => {
+      active = false;
+    };
+  }, [grantDialogOpen, grantWorkspace]);
   const workspaceProfileScope =
     kind === "workspaces" ? String(draft?.id ?? "") : "";
   useEffect(() => {
@@ -456,6 +523,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     }
   }
   function open(record?: Row) {
+    setGrantWorkspace("");
+    setGrantDiscovery({
+      workspace: "",
+      loading: false,
+      profiles: [],
+      failed: false,
+    });
     setEditing(Boolean(record));
     setDraft(
       record
@@ -495,6 +569,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   async function save() {
     if (!draft) return;
     try {
+      if (
+        kind === "compute" &&
+        Array.isArray(draft.profiles) &&
+        draft.profiles.some(
+          (id) => !grantProfiles.some((profile) => profile.id === id),
+        )
+      )
+        throw new Error(
+          "Select profiles verified for the current shared workspace or clear unavailable choices.",
+        );
       const payload: Row = {};
       for (const f of fields[kind]) {
         const v = draft[f.key];
@@ -1014,6 +1098,71 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 permissions and recorded in the audit log.
               </p>
               <div className="form-grid">
+                {kind === "compute" && config.user.admin && (
+                  <label className="span-two">
+                    Shared workspace
+                    <select
+                      aria-label="Shared workspace"
+                      value={grantWorkspace}
+                      disabled={busy}
+                      onChange={(event) => {
+                        setGrantWorkspace(event.target.value);
+                        setGrantDiscovery({
+                          workspace: event.target.value,
+                          loading: Boolean(event.target.value),
+                          profiles: [],
+                          failed: false,
+                        });
+                        setDraft({
+                          ...draft,
+                          profiles: Array.isArray(draft.profiles)
+                            ? draft.profiles.filter((id) =>
+                                grantBaseProfiles.some(
+                                  (profile) => profile.id === id,
+                                ),
+                              )
+                            : [],
+                        });
+                      }}
+                    >
+                      <option value="">No shared workspace</option>
+                      {(refs.workspaces ?? [])
+                        .filter(
+                          (workspace) =>
+                            (workspace.source == null ||
+                              workspace.source === "local") &&
+                            workspace.external_id == null,
+                        )
+                        .map((workspace) => (
+                          <option
+                            key={String(workspace.id)}
+                            value={String(workspace.id)}
+                          >
+                            {display(workspace.name ?? workspace.id)}
+                          </option>
+                        ))}
+                    </select>
+                    <span className="field-help">
+                      GPU choices are available only for the selected approved
+                      shared workspace. CPU choices remain available.
+                    </span>
+                    {grantWorkspace &&
+                      (grantDiscovery.loading ||
+                        grantDiscovery.workspace !== grantWorkspace) && (
+                        <span role="status">
+                          Checking workspace GPU profiles…
+                        </span>
+                      )}
+                    {grantWorkspace &&
+                      grantDiscovery.workspace === grantWorkspace &&
+                      grantDiscovery.failed && (
+                        <span role="alert">
+                          Workspace GPU profiles could not be verified. CPU
+                          choices remain available.
+                        </span>
+                      )}
+                  </label>
+                )}
                 {fields[kind]
                   .filter(
                     (f) =>
@@ -1025,7 +1174,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     let options =
                       f.reference === "profiles" && kind === "workspaces"
                         ? workspaceProfiles
-                        : (refs[f.reference ?? ""] ?? []);
+                        : f.reference === "profiles" && kind === "compute"
+                          ? grantProfiles
+                          : (refs[f.reference ?? ""] ?? []);
                     if (
                       f.reference === "terms" ||
                       f.reference === "groups" ||
