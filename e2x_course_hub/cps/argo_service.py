@@ -446,6 +446,8 @@ class ArgoProxyHandler(ArgoHandler):
         else:
             if object_request and response.code in (403, 404):
                 raise web.HTTPError(404, reason="Resource not found")
+            if response.code in (503, 504):
+                raise web.HTTPError(response.code, reason="Compute stream unavailable")
             if response.code != 200 or status["type"] not in allowed_types:
                 raise web.HTTPError(response.code if response.code in (401, 403, 404, 429) else 502,
                                     reason="Compute stream rejected")

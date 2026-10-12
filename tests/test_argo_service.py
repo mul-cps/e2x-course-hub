@@ -111,6 +111,7 @@ class ArgoServiceTest(AsyncHTTPTestCase):
         self.truncate_artifact = False
         self.artifact_body = b'{"cells":[]}\n'
         self.compute_error_code = None
+        self.compute_error_type = None
         self.identities = {
             "visitor-alice": {"name": "alice", "admin": False, "kind": "user", "groups": [],
                               "scopes": ["access:services!service=cps-argo-ui"]},
@@ -164,6 +165,7 @@ class ArgoServiceTest(AsyncHTTPTestCase):
                 content_type = ("application/octet-stream" if path.startswith("artifact-files/")
                                 else "text/event-stream" if path.endswith("/log")
                                 or "workflow-events/" in path else "application/json")
+                content_type = outer.compute_error_type or content_type
                 self.set_header("Content-Type", content_type)
                 self.set_header("Content-Disposition", 'attachment; filename="private-name.ipynb"')
                 self.set_header("Set-Cookie", "upstream-cookie=forbidden")
@@ -549,6 +551,41 @@ class ArgoServiceTest(AsyncHTTPTestCase):
             ):
                 with self.subTest(path=path, upstream_code=code):
                     self.assertEqual(self.fetch(path, headers=self.headers()).code, code)
+
+    def test_stream_availability_statuses_keep_generic_body_and_drop_upstream_details(self):
+        paths = (
+            "/argo/api/v1/workflows/cps-workflows/wf/log",
+            "/argo/api/v1/workflow-events/cps-workflows",
+            "/argo/artifact-files/cps-workflows/workflows/wf/node/inputs/snapshot",
+            "/argo/artifact-files/cps-workflows/workflows/wf/node/outputs/executed-notebook",
+        )
+        # The gateway's real availability errors are JSON, not the successful
+        # artifact/SSE content types. Exercise actual socket callbacks for both.
+        for code in (503, 504):
+            self.compute_error_code = code
+            expected_body = None
+            for content_type in ("application/json", "text/event-stream", "application/octet-stream"):
+                self.compute_error_type = content_type
+                for path in paths:
+                    with self.subTest(code=code, content_type=content_type, path=path):
+                        response = self.fetch(path, headers=self.headers())
+                        self.assertEqual(response.code, code)
+                        self.assertIn(b"Compute stream unavailable", response.body)
+                        self.assertNotIn(b"private-upstream", response.body)
+                        self.assertNotIn("private-upstream", str(response.headers))
+                        self.assertNotIn("upstream-cookie", str(response.headers))
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+                        for name in ("Content-Disposition", "Location", "WWW-Authenticate",
+                                     "X-Secret", "X-Accel-Buffering"):
+                            self.assertNotIn(name, response.headers)
+                        if expected_body is None:
+                            expected_body = response.body
+                        self.assertEqual(response.body, expected_body)
+            for path in paths[2:]:
+                with self.subTest(method="HEAD", code=code, path=path):
+                    response = self.fetch(path, method="HEAD", headers=self.headers())
+                    self.assertEqual(response.code, code)
+                    self.assertEqual(response.body, b"")
 
     @gen_test
     async def test_truncated_artifact_aborts_browser_transfer(self):
