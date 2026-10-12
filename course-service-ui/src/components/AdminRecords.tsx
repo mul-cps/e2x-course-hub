@@ -598,7 +598,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         : kind === "memberships"
           ? ["person_id", "course_id", "term_id", "role", "expires"]
           : kind === "workspaces"
-            ? ["id", "course_id", "group_id", "profile", "state"]
+            ? ["id", "course_id", "group_id", "profile", "state", "notice"]
             : kind === "assignments"
               ? ["id", "course_id", "term_id", "mode", "state"]
               : [

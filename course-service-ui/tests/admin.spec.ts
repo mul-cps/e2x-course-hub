@@ -277,6 +277,52 @@ test("member removal selects actual membership and warns about kernel interrupti
     body: { membership_id: "m-alice" },
   });
 });
+test("cleanup-pending Stop remains retryable after refresh", async ({ page }) => {
+  const cleanupNotice =
+    "Hub server stopped; native GPU cleanup is pending, reservations retained. Stop cannot finish until trusted cleanup is confirmed.";
+  const workspace = { ...initial.workspaces[0], state: "running", notice: null as string | null };
+  let stops = 0;
+  await page.route(
+    (url) => url.pathname === "/api/local/workspaces",
+    (route) => route.fulfill({ json: { records: [workspace] } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/workspaces/ws-a/stop",
+    async (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({});
+      stops += 1;
+      if (stops === 1) {
+        workspace.state = "stopping";
+        workspace.notice = cleanupNotice;
+        await route.fulfill({
+          status: 409,
+          json: { detail: "Trusted native GPU cleanup is unconfirmed; reservations retained. Retry Stop to recheck cleanup." },
+        });
+      } else {
+        workspace.state = "stopped";
+        workspace.notice = null;
+        await route.fulfill({ json: { workspace } });
+      }
+    },
+  );
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("reservations retained");
+
+  await page.reload();
+  const row = page.getByRole("row").filter({ hasText: "ws-a" });
+  await expect(row).toContainText("stopping");
+  await expect(row).toContainText(cleanupNotice);
+  await expect(row.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await row.getByRole("button", { name: "Stop", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(row).toContainText("stopped");
+  await expect(row).not.toContainText(cleanupNotice);
+  expect(stops).toBe(2);
+});
 test("destructive deletion requires explicit confirmation", async ({
   page,
 }) => {
