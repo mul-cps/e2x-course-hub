@@ -207,6 +207,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const [removeMember, setRemoveMember] = useState<Row | null>(null),
     [membership, setMembership] = useState("");
   const [profileDetails, setProfileDetails] = useState<Row | null>(null);
+  const [profileEditing, setProfileEditing] = useState(false),
+    [selectedProfile, setSelectedProfile] = useState("");
   const [profileDiscovery, setProfileDiscovery] = useState<{
     workspace: string;
     loading: boolean;
@@ -426,6 +428,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const detailsPending =
     profileDiscovery.loading ||
     profileDiscovery.workspace !== String(profileDetails?.id);
+  const profileEditable =
+    profileDetails?.state === "stopped" &&
+    (profileDetails.source == null || profileDetails.source === "local") &&
+    profileDetails.external_id == null &&
+    !profileDetails.archive_pending &&
+    !profileDetails.archived;
   const storedProfileAvailable = detailProfiles.some(
     (profile) => profile.id === profileDetails?.profile,
   );
@@ -438,6 +446,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       setDraft(null);
       setConfirmation(null);
       setRemoveMember(null);
+      setProfileDetails(null);
       await refresh();
       setNotice(message);
     } catch (e) {
@@ -866,6 +875,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                                   profiles: [],
                                   failed: false,
                                 });
+                                setProfileEditing(false);
+                                setSelectedProfile("");
+                                setError("");
                                 setProfileDetails({ ...r });
                               }}
                             >
@@ -1238,11 +1250,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           >
             <div className="dialog-heading">
               <div>
-                <p className="eyebrow">Read-only details</p>
+                <p className="eyebrow">
+                  {profileEditing
+                    ? "Change stopped workspace profile"
+                    : "Profile details"}
+                </p>
                 <h2 id="profile-details-title">Workspace compute profile</h2>
               </div>
               <button
                 aria-label="Close profile details"
+                disabled={busy}
                 onClick={() => setProfileDetails(null)}
               >
                 <X size={20} />
@@ -1296,6 +1313,103 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 )}
               </div>
             )}
+            {profileEditable &&
+              (profileEditing ? (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (
+                      detailsPending ||
+                      profileDiscovery.failed ||
+                      !detailProfiles.some(
+                        (profile) => profile.id === selectedProfile,
+                      )
+                    )
+                      return;
+                    void mutate(
+                      () =>
+                        requests.post(
+                          `${config.apiUrl}/workspaces/${encodeURIComponent(String(profileDetails.id))}/profile`,
+                          { profile: selectedProfile },
+                        ),
+                      "Workspace profile updated.",
+                    );
+                  }}
+                >
+                  <label>
+                    New compute profile
+                    <select
+                      aria-label="New compute profile"
+                      required
+                      value={selectedProfile}
+                      disabled={
+                        busy || detailsPending || profileDiscovery.failed
+                      }
+                      onChange={(event) =>
+                        setSelectedProfile(event.target.value)
+                      }
+                    >
+                      <option value="">Select a profile</option>
+                      {detailProfiles.map((profile) => (
+                        <option
+                          key={String(profile.id)}
+                          value={String(profile.id)}
+                        >
+                          {display(profile.id)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="field-help">
+                    The workspace stays stopped and its files are preserved.
+                  </p>
+                  {error && <p role="alert">{error}</p>}
+                  <div className="dialog-footer">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setProfileEditing(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        busy ||
+                        detailsPending ||
+                        profileDiscovery.failed ||
+                        selectedProfile === profileDetails.profile ||
+                        !detailProfiles.some(
+                          (profile) => profile.id === selectedProfile,
+                        )
+                      }
+                    >
+                      {busy ? "Saving…" : "Save profile"}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="dialog-footer">
+                  <button
+                    disabled={
+                      busy ||
+                      detailsPending ||
+                      profileDiscovery.failed ||
+                      !detailProfiles.length
+                    }
+                    onClick={() => {
+                      setSelectedProfile(
+                        storedProfileAvailable
+                          ? String(profileDetails.profile)
+                          : "",
+                      );
+                      setProfileEditing(true);
+                    }}
+                  >
+                    Change profile
+                  </button>
+                </div>
+              ))}
             <p className="form-intro">
               Profiles are managed through shared compute policy. Starting this
               workspace still checks member permissions, resource ceilings and
