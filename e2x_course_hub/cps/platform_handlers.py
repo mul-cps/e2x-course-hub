@@ -47,11 +47,14 @@ class WorkspaceHandler(RecordsHandler):
         workspace=await service.get(identifier)
         actor=await self.authorize(workspace['course_id'],workspace.get('term_id'))
         data=self.body() if self.request.body else {}
-        allowed = {'membership_id'} if action == 'remove-member' else set()
+        allowed = {'profile'} if action == 'profile' else {'membership_id'} if action == 'remove-member' else set()
         if set(data)-allowed: raise web.HTTPError(400,reason='Resource overrides and lifecycle assertions are not accepted')
+        if action == 'profile' and (set(data) != {'profile'} or not isinstance(data['profile'],str)):
+            raise web.HTTPError(400,reason='Exact string profile field required')
         try:
             if action == 'start': await service.start(identifier,actor=actor)
             elif action == 'stop': await service.close(identifier,actor=actor)
+            elif action == 'profile': await service.change_profile(identifier,data['profile'],actor=actor)
             else: await service.remove_member(identifier,data['membership_id'],actor=actor)
         except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
@@ -94,7 +97,7 @@ class AssignmentHandler(RecordsHandler):
 default_handlers = [
     (r'/api/compute',ComputeHandler),
     (r'/api/assignments/allocate',AssignmentHandler),
-    (r'/api/workspaces/([^/]+)/(start|stop|remove-member)',WorkspaceHandler),
+    (r'/api/workspaces/([^/]+)/(start|stop|remove-member|profile)',WorkspaceHandler),
 ]
 default_handlers += status_handlers
 

@@ -186,6 +186,53 @@ class WorkspaceService:
 
     @audited_lifecycle
     @course_serialized
+    async def change_profile(self, identifier, profile, *, actor):
+        """Reconfigure a stopped writer through the ordinary central policy APIs."""
+        async with self.locks.setdefault(identifier,asyncio.Lock()):
+            workspace = await self.get(identifier)
+            if not isinstance(profile,str) or not profile.strip():
+                raise ValueError('Nonempty profile required')
+            if workspace.get('source','local') != 'local' or workspace.get('external_id') is not None:
+                raise PermissionError('Externally managed workspace profile is read-only')
+            if workspace.get('state','stopped') != 'stopped':
+                raise ValueError('Stop and reconcile workspace before changing profile')
+            if workspace.get('archive_pending') or workspace.get('archived'):
+                raise ValueError('Archived workspace profile cannot change')
+            course = next((c for c in await self.provider.courses() if c['id']==workspace['course_id']),None)
+            if not course or course.get('reconciliation_pending'):
+                raise ValueError('Owned course without reconciliation barrier required')
+            if course.get('source','local') != 'local':
+                raise PermissionError('Externally managed course is read-only')
+            bindings = [b for b in course.get('workspace_bindings',[]) if
+                        all(b.get(k)==workspace.get(k) for k in ('group_id','hub_user','hub_server'))]
+            if (len(bindings)!=1 or course.get('resource_ceiling') is None
+                    or course['resource_ceiling'] != workspace.get('course_ceiling')
+                    or any(bindings[0].get(k)!=workspace.get(k) for k in ('namespace','pod'))):
+                raise PermissionError('Unchanged administrator-controlled workspace binding and ceiling required')
+            siblings = [w for w in await self.provider.list('workspaces') if
+                        w.get('course_id')==workspace['course_id'] and w.get('group_id')==workspace['group_id']]
+            if any(w.get('state','stopped')!='stopped' for w in siblings):
+                raise ValueError('Shared group has an active or unresolved writer')
+            # Check the provider schema before any central reconfiguration, including
+            # external course/term ownership and group references.
+            from .validation import validate
+            proposed = await validate(self.provider,'workspaces',{**workspace,'profile':profile})
+            await self.hub.assert_stopped(workspace)
+            reservation = await self.compute.reservation_state(identifier)
+            if (not isinstance(reservation,dict) or reservation.get('active') is not False
+                    or reservation.get('attempt') is not None):
+                raise ValueError('Confirmed inactive reservation required before profile change')
+            # Even an inactive pooled reservation can leave native cleanup outstanding.
+            # The gateway checks actual Pod absence and its native authority here.
+            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=None)
+            members = await self.members(workspace)
+            validation = await self.compute.validate_workspace(identifier,members,profile,workspace['course_ceiling'])
+            registration = await self.compute.register_workspace(proposed,members,validation)
+            await self.compute.validate_workspace(identifier,members,profile,workspace['course_ceiling'],registration)
+            return await self.provider.put('workspaces',proposed,actor=actor)
+
+    @audited_lifecycle
+    @course_serialized
     async def start(self, identifier, *, actor):
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
