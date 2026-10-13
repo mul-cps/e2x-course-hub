@@ -21,7 +21,6 @@ STATES = {'qualification', 'limited-pilot', 'enabled', 'unavailable'}
 CHECK_STATES = {'pending', 'passed', 'blocked'}
 UTC_TIMESTAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z')
 AVAILABILITY_TIMEOUT = 5
-_SHA256 = re.compile(r'[a-f0-9]{64}')
 _REVISION = re.compile(r'sha256:[a-f0-9]{64}')
 _NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}')
 _PROFILE = re.compile(r'interactive-shared-[1-9][0-9]{0,2}')
@@ -103,7 +102,7 @@ def _validate_availability(registry, source):
         or not isinstance(registry['revision'], str)
         or not _REVISION.fullmatch(registry['revision'])
         or not isinstance(registry['policy_hash'], str)
-        or not _SHA256.fullmatch(registry['policy_hash'])
+        or not _REVISION.fullmatch(registry['policy_hash'])
         or type(registry['ready']) is not bool
     ):
         raise ValueError('Invalid live approval registry')
