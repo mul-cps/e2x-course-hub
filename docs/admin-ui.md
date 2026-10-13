@@ -27,9 +27,13 @@ existing server-injected config and template.
 The October 2026 UI revision is packaged as a full `e2x-course-hub` wheel so
 Python packaging owns the updated static assets. It preserves all Python
 application sources, schema and dependency declarations from deployed revision
-`e36805560e5f4d07626fd616e9a3b73d64901627`. There is no database schema migration.
+`901a885e921e22cc037d4b64715245cb39a29d72`. There is no database schema migration.
 The deployed workspace grant discovery and stopped-workspace profile editor
-remain available; unsupported newer approval mutation APIs are not introduced.
+remain available. Group GPU approval controls use the actual deployed approval
+GET/approve/revoke API, retaining revision guards and activation readback status.
+The image inherited OCI revision e36805560e5f4d07626fd616e9a3b73d64901627;
+a byte comparison of all 46 installed Python sources established 901a885 as
+the actual backend source. Image labels alone are insufficient provenance.
 
 Build the UI and both distributions in the verified checkout:
 

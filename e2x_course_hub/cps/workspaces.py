@@ -186,6 +186,93 @@ class WorkspaceService:
 
     @audited_lifecycle
     @course_serialized
+    async def prepare_native_approval(self, identifier, *, actor):
+        """Register/provision a stopped CPU workspace, without granting GPU access."""
+        async with self.locks.setdefault(identifier,asyncio.Lock()):
+            original = await self.get(identifier)
+            if original.get('source','local') != 'local' or original.get('external_id') is not None:
+                raise PermissionError('Externally managed workspace is read-only')
+            if (original.get('state','stopped') != 'stopped' or original.get('archived')
+                    or original.get('archive_pending')):
+                raise ValueError('Stopped, writable workspace required for approval preparation')
+            course = next((c for c in await self.provider.courses() if c['id']==original['course_id']),None)
+            if not course or course.get('reconciliation_pending'):
+                raise ValueError('Owned course without reconciliation barrier required')
+            if course.get('source','local') != 'local' or course.get('external_id') is not None:
+                raise PermissionError('Externally managed course is read-only')
+            bindings = [b for b in course.get('workspace_bindings',[]) if
+                        all(b.get(k)==original.get(k) for k in ('group_id','hub_user','hub_server'))]
+            if (len(bindings)!=1 or course.get('resource_ceiling') != original.get('course_ceiling')
+                    or not course.get('resource_ceiling')
+                    or any(not bindings[0].get(k) or
+                           original.get(k) not in (None,bindings[0][k]) for k in ('namespace','pod'))):
+                raise PermissionError('Exact administrator-controlled workspace binding and ceiling required')
+            group = next((g for g in await self.provider.groups(original['course_id'])
+                          if g['id']==original['group_id']),None)
+            if group is None:
+                raise ValueError('Owned group required')
+            assignment_id = original.get('assignment_id') or group.get('assignment_id')
+            assignment = next((a for a in await self.provider.list('assignments')
+                               if a['id']==assignment_id),None) if assignment_id else None
+            if assignment_id and (not assignment or assignment.get('state','open')!='open'
+                                  or assignment.get('archive_pending')):
+                raise ValueError('Assignment is closing or closed')
+            profiles = await self.compute._request('profiles')
+            profile = profiles.get(original.get('profile')) if isinstance(profiles,dict) else None
+            gpu = profile.get('gpu') if isinstance(profile,dict) else None
+            cpu_only = (gpu.get('mode')=='none' if isinstance(gpu,dict)
+                        else type(gpu) in (str,int) and str(gpu)=='0')
+            if (not isinstance(profile,dict) or profile.get('enabled') is not True
+                    or profile.get('kind')!='interactive' or not cpu_only):
+                raise ValueError('Enabled interactive CPU profile required for approval preparation')
+            from .validation import validate
+            prepared = await validate(self.provider,'workspaces',{**original,
+                'namespace':bindings[0]['namespace'],'pod':bindings[0]['pod']})
+            members = await self.members(prepared)
+
+            async def unchanged(expected):
+                current_course = next((c for c in await self.provider.courses() if c['id']==course['id']),None)
+                current_group = next((g for g in await self.provider.groups(course['id']) if g['id']==group['id']),None)
+                current_assignment = next((a for a in await self.provider.list('assignments')
+                                           if a['id']==assignment_id),None) if assignment_id else None
+                siblings = [w for w in await self.provider.list('workspaces') if
+                            w.get('course_id')==course['id'] and w.get('group_id')==group['id']
+                            and w['id']!=identifier]
+                if (await self.get(identifier)!=expected or current_course!=course
+                        or current_group!=group or current_assignment!=assignment
+                        or any(w.get('state','stopped')!='stopped' for w in siblings)
+                        or await self.members(prepared)!=members):
+                    raise ValueError('Workspace, course binding or canonical membership changed during preparation')
+
+            await unchanged(original)
+            await self.hub.assert_stopped(prepared)
+            reservation = await self.compute.reservation_state(identifier)
+            if (not isinstance(reservation,dict) or reservation.get('active') is not False
+                    or reservation.get('attempt') is not None):
+                raise ValueError('Confirmed inactive reservation required before approval preparation')
+            validation = await self.compute.validate_workspace(identifier,members,prepared['profile'],prepared['course_ceiling'])
+            await unchanged(original)
+            # Block normal Starts and membership edits while asynchronous storage is prepared.
+            guarded = await self.provider.put('workspaces',{**prepared,'state':'preparing'},actor=actor)
+            try:
+                registration = await self.compute.register_workspace(prepared,members,validation)
+                await unchanged(guarded)
+                # A new workspace needs its trusted central mapping before the
+                # gateway can observe Pod absence and confirm native cleanup.
+                await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=None)
+                await unchanged(guarded)
+                await self.filesystem.provision(prepared,actor=actor)
+                await self.compute.validate_workspace(identifier,members,prepared['profile'],prepared['course_ceiling'],registration)
+                await unchanged(guarded)
+                return await self.provider.put('workspaces',{**prepared,'state':'stopped'},actor=actor)
+            except Exception:
+                # No spawn/claim happened. Do not overwrite a concurrent foreign edit.
+                if await self.get(identifier)==guarded:
+                    await self.provider.put('workspaces',original,actor=actor)
+                raise
+
+    @audited_lifecycle
+    @course_serialized
     async def change_profile(self, identifier, profile, *, actor):
         """Reconfigure a stopped writer through the ordinary central policy APIs."""
         async with self.locks.setdefault(identifier,asyncio.Lock()):
