@@ -107,7 +107,9 @@ class PlatformStatusAuthTest(AsyncHTTPTestCase):
         with patch('e2x_course_hub.cps.platform_status.read_status', return_value=status()) as reader:
             response = self.fetch('/api/platform-status')
             self.assertEqual(response.code, 200)
-            self.assertEqual(json.loads(response.body), status())
+            result = json.loads(response.body)
+            self.assertEqual({k: result[k] for k in status()}, status())
+            self.assertEqual(result['availability']['state'], 'unavailable')
             self.assertEqual(response.headers['Cache-Control'], 'no-store')
             self.authenticated = False
             self.assertEqual(self.fetch('/api/platform-status', follow_redirects=False).code, 302)
