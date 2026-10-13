@@ -23,6 +23,7 @@ type Field = {
   type?: "number" | "list" | "textarea" | "date";
   options?: string[];
   reference?: string;
+  help?: string;
 };
 type Kind =
   | "courses"
@@ -84,6 +85,11 @@ const fields: Record<Kind, Field[]> = {
     id,
     name,
     { key: "description", label: "Description", type: "textarea" },
+    {
+      ...course,
+      required: false,
+      help: "Optionally associate this project with an existing course.",
+    },
   ],
   compute: [
     id,
@@ -100,6 +106,7 @@ const fields: Record<Kind, Field[]> = {
       label: "Interactive allowance",
       type: "number",
       required: true,
+      help: "Maximum simultaneous interactive reservations. A shared workspace reserves one allowance per member.",
     },
     { key: "starts", label: "Valid from (UTC)", type: "date" },
     { key: "expires", label: "Expires (UTC)", type: "date", required: true },
@@ -175,6 +182,25 @@ const display = (v: unknown): string =>
             .map(([k, val]) => `${k}: ${display(val)}`)
             .join(" · ")
         : String(v);
+function execution(profile: Row): string {
+  const gpu =
+    profile.gpu && typeof profile.gpu === "object"
+      ? (profile.gpu as Row)
+      : undefined;
+  const modes: Record<string, string> = {
+    none: "CPU",
+    shared: "Shared GPU",
+    exclusive: "Exclusive GPU",
+  };
+  const kinds: Record<string, string> = {
+    interactive: "Interactive",
+    batch: "Batch",
+  };
+  return [
+    kinds[String(profile.kind)] ?? display(profile.kind),
+    modes[String(gpu?.mode)] ?? "GPU mode unspecified",
+  ].join(" · ");
+}
 function rowsFrom(result: unknown): Row[] {
   const d = result as Row;
   const content = d.records ?? d.grants ?? d.profiles;
@@ -190,6 +216,7 @@ function rowsFrom(result: unknown): Row[] {
 export default function AdminRecords({ kind }: { kind: Kind }) {
   const [records, setRecords] = useState<Row[]>([]),
     [refs, setRefs] = useState<Record<string, Row[]>>({});
+  const [loadFailed, setLoadFailed] = useState(false);
   const [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -210,19 +237,21 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const [groupApproval, setGroupApproval] = useState<Row | null>(null);
   const [approvalProfile, setApprovalProfile] = useState("");
   const [approvalError, setApprovalError] = useState("");
-  const [grantWorkspace, setGrantWorkspace] = useState("");
-  const [grantDiscovery, setGrantDiscovery] = useState<{
-    workspace: string;
-    loading: boolean;
-    profiles: Row[];
-    failed: boolean;
-  }>({ workspace: "", loading: true, profiles: [], failed: false });
+  const [profileEditing, setProfileEditing] = useState(false),
+    [selectedProfile, setSelectedProfile] = useState("");
   const [profileDiscovery, setProfileDiscovery] = useState<{
     workspace: string;
     loading: boolean;
     profiles: Row[];
     failed: boolean;
   }>({ workspace: "", loading: true, profiles: [], failed: false });
+  const [grantWorkspace, setGrantWorkspace] = useState("");
+  const [grantDiscovery, setGrantDiscovery] = useState<{
+    workspace: string;
+    loading: boolean;
+    profiles: Row[];
+    failed: boolean;
+  }>({ workspace: "", loading: false, profiles: [], failed: false });
   const [confirmation, setConfirmation] = useState<{
     message: string;
     run: () => Promise<void>;
@@ -285,6 +314,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const url = `${config.apiUrl}/${kind === "compute" ? "compute" : `local/${kind}`}`;
   async function refresh(lookup = person) {
     setLoading(true);
+    setLoadFailed(false);
     setError("");
     try {
       const result = await requests.get(
@@ -295,6 +325,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       setView(lookup && kind === "compute" ? "grants" : "profiles");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -303,6 +334,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     let active = true;
     setLoading(true);
     setRecords([]);
+    setLoadFailed(false);
     setDraft(null);
     setProfileDetails(null);
     setSearch("");
@@ -316,7 +348,10 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         if (active) setRecords(rowsFrom(r));
       })
       .catch((e) => {
-        if (active) setError(String(e));
+        if (active) {
+          setError(String(e));
+          setLoadFailed(true);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -330,12 +365,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     const needed = [
       ...new Set([
         ...fields[kind].flatMap((f) =>
-          f.reference && !(["workspaces", "compute"].includes(kind) && f.reference === "profiles")
+          f.reference && !(kind === "workspaces" && f.reference === "profiles")
             ? [f.reference]
             : [],
         ),
         ...(kind === "workspaces" ? ["memberships"] : []),
-        ...(kind === "compute" ? ["workspaces"] : []),
+        ...(kind === "compute" && config.user.admin ? ["workspaces"] : []),
       ]),
     ];
     Promise.all(
@@ -361,29 +396,65 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       active = false;
     };
   }, [kind]);
+  const grantBaseProfiles = (refs.profiles ?? []).filter((profile) => {
+    const gpu = profile.gpu;
+    return (
+      !profile.nativeGroupWorkspace &&
+      !profile.nativePilotWorkspace &&
+      !(gpu && typeof gpu === "object" && (gpu as Row).mode !== "none") &&
+      !(typeof gpu === "string" && gpu !== "0") &&
+      !/^interactive-(shared|exclusive|native)-/.test(String(profile.id))
+    );
+  });
+  const grantProfiles = [
+    ...grantBaseProfiles,
+    ...(grantDiscovery.workspace === grantWorkspace &&
+    !grantDiscovery.loading &&
+    !grantDiscovery.failed
+      ? grantDiscovery.profiles.filter(
+          (profile) =>
+            profile.kind === "interactive" &&
+            profile.enabled === true &&
+            profile.nativeGroupWorkspace === grantWorkspace &&
+            (profile.gpu as Row | undefined)?.mode === "shared" &&
+            !grantBaseProfiles.some((base) => base.id === profile.id),
+        )
+      : []),
+  ];
+  const grantDialogOpen = kind === "compute" && draft !== null;
   useEffect(() => {
-    if (kind !== "compute") return;
+    if (!grantDialogOpen || !grantWorkspace) return;
     let active = true;
-    setGrantDiscovery({ workspace: grantWorkspace, loading: true, profiles: [], failed: false });
-    requests.get(`${config.apiUrl}/compute`, grantWorkspace ? { workspace: grantWorkspace } : undefined)
+    setGrantDiscovery({
+      workspace: grantWorkspace,
+      loading: true,
+      profiles: [],
+      failed: false,
+    });
+    requests
+      .get(`${config.apiUrl}/compute`, { workspace: grantWorkspace })
       .then((result) => {
-        if (active) setGrantDiscovery({ workspace: grantWorkspace, loading: false, profiles: rowsFrom(result), failed: false });
+        if (active)
+          setGrantDiscovery({
+            workspace: grantWorkspace,
+            loading: false,
+            profiles: rowsFrom(result),
+            failed: false,
+          });
       })
       .catch(() => {
-        if (active) setGrantDiscovery({ workspace: grantWorkspace, loading: false, profiles: [], failed: true });
+        if (active)
+          setGrantDiscovery({
+            workspace: grantWorkspace,
+            loading: false,
+            profiles: [],
+            failed: true,
+          });
       });
-    return () => { active = false; };
-  }, [kind, grantWorkspace]);
-  const grantChoicesPending = grantDiscovery.loading || grantDiscovery.workspace !== grantWorkspace;
-  const grantProfiles = grantChoicesPending ? [] : grantDiscovery.profiles.filter((profile) => {
-    if (profile.enabled !== true) return false;
-    const gpu = profile.gpu as Row | undefined;
-    const scoped = profile.nativeGroupWorkspace !== undefined ||
-      (gpu?.qualification as Row | undefined)?.status === "qualified-group" ||
-      String(profile.id).startsWith("interactive-shared-");
-    return !scoped || (grantWorkspace !== "" && profile.nativeGroupWorkspace === grantWorkspace &&
-      profile.kind === "interactive" && ["interactive-shared-5", "interactive-shared-10"].includes(String(profile.id)));
-  });
+    return () => {
+      active = false;
+    };
+  }, [grantDialogOpen, grantWorkspace]);
   const workspaceProfileScope =
     kind === "workspaces" ? String(draft?.id ?? "") : "";
   useEffect(() => {
@@ -460,6 +531,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const detailsPending =
     profileDiscovery.loading ||
     profileDiscovery.workspace !== String(profileDetails?.id);
+  const profileEditable =
+    profileDetails?.state === "stopped" &&
+    (profileDetails.source == null || profileDetails.source === "local") &&
+    profileDetails.external_id == null &&
+    !profileDetails.archive_pending &&
+    !profileDetails.archived;
   const storedProfileAvailable = detailProfiles.some(
     (profile) => profile.id === profileDetails?.profile,
   );
@@ -513,6 +590,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       setDraft(null);
       setConfirmation(null);
       setRemoveMember(null);
+      setProfileDetails(null);
       await refresh();
       setNotice(message);
     } catch (e) {
@@ -523,6 +601,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   }
   function open(record?: Row) {
     setGrantWorkspace("");
+    setGrantDiscovery({
+      workspace: "",
+      loading: false,
+      profiles: [],
+      failed: false,
+    });
     setEditing(Boolean(record));
     setDraft(
       record
@@ -562,9 +646,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   async function save() {
     if (!draft) return;
     try {
-      if (kind === "compute" && (grantChoicesPending || grantDiscovery.failed || !Array.isArray(draft.profiles) ||
-          (draft.profiles as string[]).some((name) => !grantProfiles.some((profile) => profile.id === name))))
-        throw new Error("Select currently available profiles.");
+      if (
+        kind === "compute" &&
+        Array.isArray(draft.profiles) &&
+        draft.profiles.some(
+          (id) => !grantProfiles.some((profile) => profile.id === id),
+        )
+      )
+        throw new Error(
+          "Select profiles verified for the current shared workspace or clear unavailable choices.",
+        );
       const payload: Row = {};
       for (const f of fields[kind]) {
         const v = draft[f.key];
@@ -672,10 +763,36 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       ? ["time", "actor", "kind", "target", "outcome"]
       : kind === "compute"
         ? view === "grants"
-          ? ["id", "profiles", "allowance", "expires", "reason"]
-          : ["id", "name", "cpu", "memory", "gpuMemoryGiB", "enabled"]
+          ? [
+              "id",
+              "profiles",
+              "projects",
+              "allowance",
+              "starts",
+              "expires",
+              "reason",
+            ]
+          : [
+              "id",
+              "name",
+              "execution",
+              "cpu",
+              "memory",
+              "gpuMemoryGiB",
+              "qualification",
+              "enabled",
+            ]
         : kind === "memberships"
-          ? ["person_id", "course_id", "term_id", "role", "expires"]
+          ? [
+              "person_id",
+              "canonical_person_id",
+              "course_id",
+              "term_id",
+              "role",
+              "starts",
+              "expires",
+              "source",
+            ]
           : kind === "workspaces"
             ? ["id", "course_id", "group_id", "profile", "state", "notice"]
             : kind === "assignments"
@@ -698,7 +815,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     time: "Time",
     profiles: "Profiles",
     expires: "Expires",
-    allowance: "Allowance",
+    allowance: "Interactive allowance",
+    starts: "Valid from",
+    canonical_person_id: "Canonical person",
+    execution: "Execution",
+    qualification: "Qualification",
   };
   const writable =
     config.user.admin ||
@@ -728,6 +849,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         )}
       </div>
       {(kind === "compute" || kind === "workspaces") && <PlatformStatusPanel />}
+      {kind === "compute" && (
+        <p className="info-note">
+          The catalog includes interactive notebooks and batch jobs. Profile
+          availability comes from shared policy; GPU qualification and workspace
+          approval must be current. Grants do not activate disabled profiles.
+        </p>
+      )}
       {kind === "compute" && (
         <form
           className="lookup-panel"
@@ -806,6 +934,15 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           <div className="empty-state" role="status">
             Loading {titles[kind].toLowerCase()}…
           </div>
+        ) : loadFailed ? (
+          <div className="empty-state">
+            <AlertCircle size={32} />
+            <h2>Records could not be loaded</h2>
+            <p>Retry to see current records and availability.</p>
+            <button disabled={busy} onClick={() => void refresh()}>
+              Retry loading
+            </button>
+          </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
             <FolderOpen size={32} />
@@ -881,13 +1018,17 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         title={display(r[c])}
                         className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
                       >
-                        {[
-                          "state",
-                          "source",
-                          "outcome",
-                          "role",
-                          "enabled",
-                        ].includes(c) ? (
+                        {c === "execution" ? (
+                          execution(r)
+                        ) : c === "qualification" ? (
+                          display((r.gpu as Row | undefined)?.qualification)
+                        ) : [
+                            "state",
+                            "source",
+                            "outcome",
+                            "role",
+                            "enabled",
+                          ].includes(c) ? (
                           <span
                             className={`status-pill ${r[c] === "failure" || r[c] === "denied" ? "bad" : r[c] === "running" || r[c] === "success" || r[c] === true ? "good" : r[c] === false || r[c] === "stopped" || r[c] === "closed" ? "muted" : ""}`}
                           >
@@ -902,7 +1043,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                                     (c === "state" ? "open" : undefined)),
                             )}
                           </span>
-                        ) : ["time", "expires"].includes(c) &&
+                        ) : ["time", "starts", "expires"].includes(c) &&
                           r[c] &&
                           !Number.isNaN(Date.parse(String(r[c]))) ? (
                           <time dateTime={String(r[c])}>
@@ -920,6 +1061,25 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     ))}
                     <td>
                       <div className="row-actions">
+                        {kind !== "audit" && (
+                          <details>
+                            <summary>Details</summary>
+                            <dl>
+                              {Object.entries(r)
+                                .filter(([key]) => !columns.includes(key))
+                                .map(([key, value]) => (
+                                  <div key={key}>
+                                    <dt>
+                                      {key
+                                        .replaceAll("_", " ")
+                                        .replace(/^./, (c) => c.toUpperCase())}
+                                    </dt>
+                                    <dd>{display(value)}</dd>
+                                  </div>
+                                ))}
+                            </dl>
+                          </details>
+                        )}
                         {kind === "audit" ? (
                           <details>
                             <summary>Details</summary>
@@ -945,6 +1105,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                                   profiles: [],
                                   failed: false,
                                 });
+                                setProfileEditing(false);
+                                setSelectedProfile("");
+                                setError("");
                                 setProfileDetails({ ...r });
                               }}
                             >
@@ -1081,22 +1244,69 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 permissions and recorded in the audit log.
               </p>
               <div className="form-grid">
-                {kind === "compute" && (
-                  <label className="full-width">
-                    Grant workspace context
-                    <select aria-label="Grant workspace context" value={grantWorkspace} disabled={busy}
+                {kind === "compute" && config.user.admin && (
+                  <label className="span-two">
+                    Shared workspace
+                    <select
+                      aria-label="Shared workspace"
+                      value={grantWorkspace}
+                      disabled={busy}
                       onChange={(event) => {
                         setGrantWorkspace(event.target.value);
-                        setDraft({ ...draft, profiles: [] });
-                      }}>
-                      <option value="">Personal / CPU profiles</option>
-                      {(refs.workspaces ?? []).map((workspace) => (
-                        <option key={String(workspace.id)} value={String(workspace.id)}>{display(workspace.id)}</option>
-                      ))}
+                        setGrantDiscovery({
+                          workspace: event.target.value,
+                          loading: Boolean(event.target.value),
+                          profiles: [],
+                          failed: false,
+                        });
+                        setDraft({
+                          ...draft,
+                          profiles: Array.isArray(draft.profiles)
+                            ? draft.profiles.filter((id) =>
+                                grantBaseProfiles.some(
+                                  (profile) => profile.id === id,
+                                ),
+                              )
+                            : [],
+                        });
+                      }}
+                    >
+                      <option value="">No shared workspace</option>
+                      {(refs.workspaces ?? [])
+                        .filter(
+                          (workspace) =>
+                            (workspace.source == null ||
+                              workspace.source === "local") &&
+                            workspace.external_id == null,
+                        )
+                        .map((workspace) => (
+                          <option
+                            key={String(workspace.id)}
+                            value={String(workspace.id)}
+                          >
+                            {display(workspace.name ?? workspace.id)}
+                          </option>
+                        ))}
                     </select>
-                    <span className="field-help">Select an approved workspace to include its shared GPU profile. Start still checks each member’s current access.</span>
-                    {grantChoicesPending && <span role="status">Loading profile choices…</span>}
-                    {!grantChoicesPending && grantDiscovery.failed && <span role="alert">Workspace profile choices are unavailable.</span>}
+                    <span className="field-help">
+                      GPU choices are available only for the selected approved
+                      shared workspace. CPU choices remain available.
+                    </span>
+                    {grantWorkspace &&
+                      (grantDiscovery.loading ||
+                        grantDiscovery.workspace !== grantWorkspace) && (
+                        <span role="status">
+                          Checking workspace GPU profiles…
+                        </span>
+                      )}
+                    {grantWorkspace &&
+                      grantDiscovery.workspace === grantWorkspace &&
+                      grantDiscovery.failed && (
+                        <span role="alert">
+                          Workspace GPU profiles could not be verified. CPU
+                          choices remain available.
+                        </span>
+                      )}
                   </label>
                 )}
                 {fields[kind]
@@ -1112,7 +1322,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         ? workspaceProfiles
                         : f.reference === "profiles" && kind === "compute"
                           ? grantProfiles
-                        : (refs[f.reference ?? ""] ?? []);
+                          : (refs[f.reference ?? ""] ?? []);
                     if (
                       f.reference === "terms" ||
                       f.reference === "groups" ||
@@ -1243,6 +1453,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                             }
                           />
                         )}
+                        {f.help && <span className="field-help">{f.help}</span>}
                         {f.key === "id" && (
                           <span className="field-help">
                             Stable identifier; cannot be changed after creation.
@@ -1312,7 +1523,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 >
                   Cancel
                 </button>
-                <button className="primary-button" disabled={busy || (kind === "compute" && (grantChoicesPending || grantDiscovery.failed))}>
+                <button className="primary-button" disabled={busy}>
                   {busy
                     ? "Saving…"
                     : kind === "assignments"
@@ -1337,11 +1548,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           >
             <div className="dialog-heading">
               <div>
-                <p className="eyebrow">Compute policy</p>
+                <p className="eyebrow">
+                  {profileEditing
+                    ? "Change stopped workspace profile"
+                    : "Profile details"}
+                </p>
                 <h2 id="profile-details-title">Workspace compute profile</h2>
               </div>
               <button
                 aria-label="Close profile details"
+                disabled={busy}
                 onClick={() => setProfileDetails(null)}
               >
                 <X size={20} />
@@ -1395,6 +1611,104 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 )}
               </div>
             )}
+            {profileEditable &&
+              (profileEditing ? (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (
+                      detailsPending ||
+                      profileDiscovery.failed ||
+                      !detailProfiles.some(
+                        (profile) => profile.id === selectedProfile,
+                      )
+                    )
+                      return;
+                    void mutate(
+                      () =>
+                        requests.post(
+                          `${config.apiUrl}/workspaces/${encodeURIComponent(String(profileDetails.id))}/profile`,
+                          { profile: selectedProfile },
+                        ),
+                      "Workspace profile updated.",
+                    );
+                  }}
+                >
+                  <label>
+                    New compute profile
+                    <select
+                      aria-label="New compute profile"
+                      required
+                      value={selectedProfile}
+                      disabled={
+                        busy || detailsPending || profileDiscovery.failed
+                      }
+                      onChange={(event) =>
+                        setSelectedProfile(event.target.value)
+                      }
+                    >
+                      <option value="">Select a profile</option>
+                      {detailProfiles.map((profile) => (
+                        <option
+                          key={String(profile.id)}
+                          value={String(profile.id)}
+                        >
+                          {display(profile.id)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="field-help">
+                    The workspace stays stopped and its files are preserved.
+                  </p>
+                  {error && <p role="alert">{error}</p>}
+                  <div className="dialog-footer">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setProfileEditing(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        busy ||
+                        detailsPending ||
+                        profileDiscovery.failed ||
+                        selectedProfile === profileDetails.profile ||
+                        !detailProfiles.some(
+                          (profile) => profile.id === selectedProfile,
+                        )
+                      }
+                    >
+                      {busy ? "Saving…" : "Save profile"}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="dialog-footer">
+                  <button
+                    disabled={
+                      busy ||
+                      detailsPending ||
+                      profileDiscovery.failed ||
+                      !detailProfiles.length
+                    }
+                    onClick={() => {
+                      setSelectedProfile(
+                        storedProfileAvailable
+                          ? String(profileDetails.profile)
+                          : "",
+                      );
+                      setProfileEditing(true);
+                    }}
+                  >
+                    Change profile
+                  </button>
+                </div>
+              ))}
+            {!profileEditable && <p className="info-note">{profileDetails.state !== "stopped" ? "Stop and reconcile this workspace before changing its compute profile." : "Externally managed or archived workspace profiles are read-only."}</p>}
             <p className="form-intro">
               Profiles are managed through shared compute policy. Starting this
               workspace still checks member permissions, resource ceilings and
@@ -1412,25 +1726,66 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       : "This workspace does not have a GPU approval."}
                   </p>
                   <p className="form-intro">
-                    Stop the workspace before changing its approval. Approval checks the course ceiling,
-                    neutral account, storage and reviewed member identities. Members also need current
-                    compute grants before Start; each member contributes one interactive allowance.
+                    Stop the workspace before changing its approval. Approval
+                    checks the course ceiling, neutral account, storage and
+                    reviewed member identities. Members also need current
+                    compute grants before Start; each member contributes one
+                    interactive allowance.
                   </p>
                 </div>
                 <label>
                   Qualified shared GPU profile
-                  <select value={approvalProfile} onChange={(e) => setApprovalProfile(e.target.value)} disabled={busy}>
+                  <select
+                    value={approvalProfile}
+                    onChange={(e) => setApprovalProfile(e.target.value)}
+                    disabled={busy}
+                  >
                     <option value="">Select profile</option>
-                    {qualifiedProfiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
+                    {qualifiedProfiles.map((profile) => (
+                      <option key={profile} value={profile}>
+                        {profile}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <div className="dialog-actions">
-                  <button disabled={busy || !approvalProfile} onClick={() => void updateGroupApproval()}>
+                  <button
+                    disabled={
+                      busy ||
+                      !approvalProfile ||
+                      profileDetails.state !== "stopped" ||
+                      profileDetails.archived === true ||
+                      profileDetails.archive_pending === true
+                    }
+                    onClick={() => void updateGroupApproval()}
+                  >
                     {busy ? "Saving…" : "Approve GPU profile"}
                   </button>
-                  {approvedGroup && <button disabled={busy} onClick={() => void updateGroupApproval(true)}>Revoke GPU approval</button>}
+                  {approvedGroup && (
+                    <button
+                      disabled={busy || profileDetails.state !== "stopped"}
+                      onClick={() => void updateGroupApproval(true)}
+                    >
+                      Revoke GPU approval
+                    </button>
+                  )}
                 </div>
-                {approvalError && <p className="full-width" role="alert">{approvalError}</p>}
+                {qualifiedProfiles.length === 0 && (
+                  <p className="full-width">
+                    No shared GPU profiles are currently qualified for approval.
+                  </p>
+                )}
+                {profileDetails.state !== "stopped" && (
+                  <p className="full-width">
+                    Stop and reconcile this workspace before changing GPU
+                    approval.
+                  </p>
+                )}
+                {approvalError && (
+                  <p className="full-width" role="alert">
+                    {approvalError}
+                  </p>
+                )}
               </div>
             )}
           </section>

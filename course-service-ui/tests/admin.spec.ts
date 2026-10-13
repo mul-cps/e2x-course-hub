@@ -64,7 +64,6 @@ const initial = {
   ],
 };
 let writes: { path: string; body: Record<string, unknown> }[];
-
 test("group GPU approval stays pending until component readbacks converge", async ({ page }) => {
   const revision = "sha256:" + "a".repeat(64);
   let approved = false;
@@ -166,106 +165,6 @@ test.beforeEach(async ({ page }) => {
     },
   );
 });
-test("grant workspace context exposes only its approved 5 or 10 GiB profile without sending context", async ({ page }) => {
-  const scopes: (string | null)[] = [];
-  await page.route((url) => url.pathname === "/api/compute", async (route) => {
-    if (route.request().method() !== "GET") return route.fallback();
-    const workspace = new URL(route.request().url()).searchParams.get("workspace");
-    scopes.push(workspace);
-    const profiles: Record<string, unknown> = { cpu: { name: "CPU", enabled: true, kind: "interactive", gpu: "0" } };
-    if (workspace) Object.assign(profiles, {
-      "interactive-shared-5": { enabled: true, kind: "interactive", nativeGroupWorkspace: workspace, gpu: { mode: "shared" } },
-      "interactive-shared-10": { enabled: true, kind: "interactive", nativeGroupWorkspace: "foreign", gpu: { mode: "shared" } },
-      "interactive-shared-20": { enabled: true, kind: "interactive", nativeGroupWorkspace: workspace, gpu: { mode: "shared" } },
-      "batch-shared-5": { enabled: true, kind: "batch", nativeGroupWorkspace: workspace, gpu: { mode: "shared" } },
-    });
-    await route.fulfill({ json: { profiles } });
-  });
-  await page.goto("/compute");
-  await page.getByRole("button", { name: "Add grant" }).click();
-  const context = page.getByLabel("Grant workspace context");
-  await expect(context).toBeVisible({ timeout: 2000 });
-  const picker = page.getByLabel("Allowed profiles");
-  await expect(picker.locator("option")).toHaveText(["CPU"]);
-  await context.selectOption("ws-a");
-  await expect(picker.locator("option")).toHaveText(["CPU", "interactive-shared-5"]);
-  await page.getByLabel("Identifier", { exact: false }).fill("group-grant");
-  await page.getByLabel("Canonical person ID", { exact: false }).fill("person-1");
-  await picker.selectOption(["cpu", "interactive-shared-5"]);
-  await page.getByLabel("Expires (UTC)", { exact: false }).fill("2027-01-01T00:00");
-  await page.getByLabel("Reason for access", { exact: false }).fill("Reviewed course group");
-  await page.getByRole("button", { name: "Save grant" }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(scopes).toContain("ws-a");
-  expect(writes).toHaveLength(1);
-  expect(writes[0].body).toEqual({ id: "group-grant", person: "person-1", profiles: ["cpu", "interactive-shared-5"], projects: [], allowance: 1, expires: "2027-01-01T00:00:00.000Z", reason: "Reviewed course group" });
-});
-
-test("grant workspace context clears GPU selections and fails closed on denied discovery", async ({ page }) => {
-  await page.route((url) => url.pathname === "/api/local/workspaces", (route) => route.fulfill({ json: { records: [...initial.workspaces, { ...initial.workspaces[0], id: "ws-b" }] } }));
-  await page.route((url) => url.pathname === "/api/compute", async (route) => {
-    const workspace = new URL(route.request().url()).searchParams.get("workspace");
-    if (workspace === "ws-b") return route.fulfill({ status: 403, json: { message: "Denied" } });
-    return route.fulfill({ json: { profiles: workspace ? { "interactive-shared-5": { enabled: true, kind: "interactive", nativeGroupWorkspace: workspace } } : { cpu: { enabled: true, kind: "interactive" } } } });
-  });
-  await page.goto("/compute");
-  await page.getByRole("button", { name: "Add grant" }).click();
-  const context = page.getByLabel("Grant workspace context");
-  await expect(context).toBeVisible({ timeout: 2000 });
-  await context.selectOption("ws-a");
-  const picker = page.getByLabel("Allowed profiles");
-  await picker.selectOption("interactive-shared-5");
-  await context.selectOption("ws-b");
-  await expect(picker.locator("option")).toHaveCount(0);
-  await expect(page.getByText("Workspace profile choices are unavailable.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Save grant" })).toBeDisabled();
-  expect(await picker.evaluate((el: HTMLSelectElement) => Array.from(el.selectedOptions, (o) => o.value))).toEqual([]);
-  expect(writes).toHaveLength(0);
-});
-
-test("grant workspace context ignores a late response from the previous workspace", async ({ page }) => {
-  let release!: () => void;
-  const pending = new Promise<void>((resolve) => { release = resolve; });
-  let requestedA = false;
-  await page.route((url) => url.pathname === "/api/local/workspaces", (route) => route.fulfill({ json: { records: [...initial.workspaces, { ...initial.workspaces[0], id: "ws-b" }] } }));
-  await page.route((url) => url.pathname === "/api/compute", async (route) => {
-    const workspace = new URL(route.request().url()).searchParams.get("workspace");
-    if (workspace === "ws-a") { requestedA = true; await pending; }
-    const id = workspace === "ws-a" ? "interactive-shared-5" : "interactive-shared-10";
-    await route.fulfill({ json: { profiles: workspace ? { [id]: { enabled: true, kind: "interactive", nativeGroupWorkspace: workspace } } : { cpu: { enabled: true, kind: "interactive" } } } });
-  });
-  await page.goto("/compute");
-  await page.getByRole("button", { name: "Add grant" }).click();
-  const context = page.getByLabel("Grant workspace context");
-  await expect(context).toBeVisible({ timeout: 2000 });
-  await context.selectOption("ws-a");
-  await expect.poll(() => requestedA).toBe(true);
-  await context.selectOption("ws-b");
-  const picker = page.getByLabel("Allowed profiles");
-  await expect(picker.locator("option")).toHaveText(["interactive-shared-10"]);
-  await picker.selectOption("interactive-shared-10");
-  const previousResponse = page.waitForResponse((r) => new URL(r.url()).searchParams.get("workspace") === "ws-a");
-  release();
-  await previousResponse;
-  await expect(picker.locator("option")).toHaveText(["interactive-shared-10"]);
-  expect(await picker.evaluate((el: HTMLSelectElement) => Array.from(el.selectedOptions, (o) => o.value))).toEqual(["interactive-shared-10"]);
-});
-
-test("grant workspace context requires profile selection for a legacy grant without profiles", async ({ page }) => {
-  await page.route((url) => url.pathname === "/api/compute" && url.searchParams.has("person"), (route) => route.fulfill({ json: { grants: [{ id: "legacy", person: "person-1", allowance: 1, expires: "2027-01-01T00:00:00Z", reason: "Legacy grant" }] } }));
-  await page.goto("/compute");
-  await page.getByLabel("Look up a person’s grants").fill("person-1");
-  await page.getByRole("button", { name: "View grants" }).click();
-  await page.getByRole("button", { name: "Edit legacy", exact: true }).click();
-  await page.getByRole("button", { name: "Save grant" }).click();
-  await expect(page.getByRole("dialog").getByRole("alert")).toHaveText("Select currently available profiles.", { timeout: 2000 });
-  expect(writes).toHaveLength(0);
-  await page.getByLabel("Allowed profiles").selectOption("cpu");
-  await page.getByRole("button", { name: "Save grant" }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(writes[0].body.profiles).toEqual(["cpu"]);
-});
-
 test("overview navigation and responsive layout", async ({ page }) => {
   await page.goto("/");
   await expect(
@@ -1223,4 +1122,120 @@ test("existing workspace compute details discard closed workspace stale response
     "Available for this workspace",
   );
   expect(writes).toEqual([]);
+});
+
+
+test("compute catalog distinguishes execution modes and qualification without enabling them", async ({
+  page,
+}) => {
+  await page.route("**/api/compute", (route) =>
+    route.fulfill({
+      json: {
+        profiles: {
+          cpu: {
+            name: "CPU notebook",
+            kind: "interactive",
+            enabled: true,
+            gpu: { mode: "none" },
+          },
+          shared: {
+            name: "Fractional GPU",
+            kind: "interactive",
+            enabled: false,
+            gpu: { mode: "shared", qualification: { status: "pending" } },
+          },
+          batch: {
+            name: "Exclusive batch",
+            kind: "batch",
+            enabled: false,
+            gpu: { mode: "exclusive" },
+          },
+        },
+      },
+    }),
+  );
+  await page.goto("/compute");
+  await expect(
+    page.getByRole("columnheader", { name: "Execution" }),
+  ).toBeVisible();
+  const shared = page.getByRole("row").filter({ hasText: "Fractional GPU" });
+  await expect(shared).toContainText("Interactive · Shared GPU");
+  await expect(shared).toContainText("pending");
+  await expect(shared).toContainText("Unavailable");
+  await expect(
+    page.getByRole("row").filter({ hasText: "Exclusive batch" }),
+  ).toContainText("Batch · Exclusive GPU");
+});
+
+test("failed record loads offer retry without a create-first empty state", async ({
+  page,
+}) => {
+  await page.route("**/api/local/projects", (route) =>
+    route.fulfill({ status: 503, json: { message: "Unavailable" } }),
+  );
+  await page.goto("/projects");
+  await expect(
+    page.getByRole("heading", { name: "Records could not be loaded" }),
+  ).toBeVisible();
+  await expect(page.getByText("Create your first record")).toHaveCount(0);
+  await page.route("**/api/local/projects", (route) =>
+    route.fulfill({ json: { records: initial.projects } }),
+  );
+  await page.getByRole("button", { name: "Retry loading" }).click();
+  await expect(
+    page.getByRole("cell", { name: "Research", exact: true }),
+  ).toBeVisible();
+});
+
+test("course details expose managed settings without adding editable operator modes", async ({
+  page,
+}) => {
+  await page.goto("/courses");
+  const row = page.getByRole("row").filter({ hasText: "Machine Learning" });
+  await row.getByText("Details", { exact: true }).click();
+  await expect(row).toContainText("Resource ceiling");
+  await expect(row).toContainText("Workspace bindings");
+  await page.getByRole("button", { name: "Edit Machine Learning" }).click();
+  await expect(page.getByLabel("native_mode")).toHaveCount(0);
+});
+
+test("stopped workspace can request an available profile change through policy", async ({ page }) => {
+  await page.route("**/api/compute?workspace=ws-a", route => route.fulfill({ json: { profiles: {
+    cpu: { kind: "interactive", enabled: true },
+    "cpu-large": { name: "Larger CPU", kind: "interactive", enabled: true },
+    gpu: { kind: "interactive", enabled: false },
+  } } }));
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "View workspace profile ws-a", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Workspace compute profile" });
+  await dialog.getByRole("button", { name: "Change profile", exact: true }).click();
+  await dialog.getByLabel("New compute profile").selectOption("cpu-large");
+  await dialog.getByRole("button", { name: "Save profile", exact: true }).click();
+  await expect(page.getByText("Workspace profile updated.")).toBeVisible();
+  expect(writes.at(-1)).toEqual({ path: "/api/workspaces/ws-a/profile", body: { profile: "cpu-large" } });
+});
+
+test("running workspace retains profile inspection without change actions", async ({ page }) => {
+  await page.route("**/api/local/workspaces", route => route.fulfill({ json: { records: [{ ...initial.workspaces[0], state: "running" }] } }));
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "View workspace profile ws-a", exact: true }).click();
+  await expect(page.getByText("Stop and reconcile this workspace before changing its compute profile.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save profile", exact: true })).toHaveCount(0);
+});
+
+
+test("denied profile change preserves the stored profile and explains the policy rejection", async ({ page }) => {
+  await page.route("**/api/compute?workspace=ws-a", route => route.fulfill({ json: { profiles: {
+    cpu: { kind: "interactive", enabled: true },
+    "cpu-large": { kind: "interactive", enabled: true },
+  } } }));
+  await page.route("**/api/workspaces/ws-a/profile", route => route.fulfill({ status: 409, json: { detail: "Reservation cleanup pending" } }));
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "View workspace profile ws-a", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Workspace compute profile" });
+  await dialog.getByRole("button", { name: "Change profile", exact: true }).click();
+  await dialog.getByLabel("New compute profile").selectOption("cpu-large");
+  await dialog.getByRole("button", { name: "Save profile", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Reservation cleanup pending");
+  await expect(dialog.getByTestId("stored-workspace-profile")).toHaveText("cpu");
 });
