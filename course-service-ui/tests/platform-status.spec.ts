@@ -33,7 +33,7 @@ test("operator status shows blockers and remaining checks on both pages", async 
   await page.route("**/api/platform-status", (route) =>
     route.fulfill({ json: record }),
   );
-  for (const path of ["/compute", "/workspaces"]) {
+  for (const path of ["/", "/compute", "/workspaces", "/integrations"]) {
     await page.goto(path);
     const panel = page.getByRole("complementary", {
       name: "GPU group sharing status",

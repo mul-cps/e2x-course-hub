@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { config } from "./config";
+import PlatformStatusPanel from "./components/PlatformStatusPanel";
 import AdminRecords from "./components/AdminRecords";
 import CoursesTable from "./components/CoursesTable";
 import CourseDetailPage from "./components/CourseDetailPage";
@@ -53,6 +54,7 @@ function Overview() {
           Manage courses <ChevronRight size={16} />
         </Link>
       </div>
+      <PlatformStatusPanel />
       <div className="section-heading">
         <h2>Quick access</h2>
         <span>Teaching, research and collaboration</span>
@@ -306,6 +308,24 @@ function App() {
                         <p>External integrations and their availability.</p>
                       </div>
                     </div>
+                    <PlatformStatusPanel />
+                    <div className="integration-card">
+                      <div className="card-icon">
+                        <GraduationCap size={24} />
+                      </div>
+                      <div>
+                        <h2>Local course provider</h2>
+                        <span className="status-pill">
+                          Available in this console
+                        </span>
+                        <p>
+                          Manage local courses, terms, memberships and groups in
+                          Courses. Externally managed records show their source
+                          and remain read-only.
+                        </p>
+                        <Link to="/courses">Manage courses →</Link>
+                      </div>
+                    </div>
                     <div className="integration-card">
                       <div className="card-icon">
                         <GraduationCap size={24} />
@@ -320,7 +340,7 @@ function App() {
                           is planned and is not deployed.
                         </p>
                         <a
-                          href="https://github.com/mul-cps/e2x-course-hub/blob/feat/cps-platform-v1/docs/cps-platform.md"
+                          href="https://github.com/mul-cps/e2x-course-hub/blob/main/docs/cps-platform.md"
                           target="_blank"
                           rel="noreferrer"
                         >

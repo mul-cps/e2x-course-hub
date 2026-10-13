@@ -23,6 +23,7 @@ type Field = {
   type?: "number" | "list" | "textarea" | "date";
   options?: string[];
   reference?: string;
+  help?: string;
 };
 type Kind =
   | "courses"
@@ -84,6 +85,11 @@ const fields: Record<Kind, Field[]> = {
     id,
     name,
     { key: "description", label: "Description", type: "textarea" },
+    {
+      ...course,
+      required: false,
+      help: "Optionally associate this project with an existing course.",
+    },
   ],
   compute: [
     id,
@@ -100,6 +106,7 @@ const fields: Record<Kind, Field[]> = {
       label: "Interactive allowance",
       type: "number",
       required: true,
+      help: "Maximum simultaneous interactive reservations. A shared workspace reserves one allowance per member.",
     },
     { key: "starts", label: "Valid from (UTC)", type: "date" },
     { key: "expires", label: "Expires (UTC)", type: "date", required: true },
@@ -175,6 +182,25 @@ const display = (v: unknown): string =>
             .map(([k, val]) => `${k}: ${display(val)}`)
             .join(" · ")
         : String(v);
+function execution(profile: Row): string {
+  const gpu =
+    profile.gpu && typeof profile.gpu === "object"
+      ? (profile.gpu as Row)
+      : undefined;
+  const modes: Record<string, string> = {
+    none: "CPU",
+    shared: "Shared GPU",
+    exclusive: "Exclusive GPU",
+  };
+  const kinds: Record<string, string> = {
+    interactive: "Interactive",
+    batch: "Batch",
+  };
+  return [
+    kinds[String(profile.kind)] ?? display(profile.kind),
+    modes[String(gpu?.mode)] ?? "GPU mode unspecified",
+  ].join(" · ");
+}
 function rowsFrom(result: unknown): Row[] {
   const d = result as Row;
   const content = d.records ?? d.grants ?? d.profiles;
@@ -190,6 +216,7 @@ function rowsFrom(result: unknown): Row[] {
 export default function AdminRecords({ kind }: { kind: Kind }) {
   const [records, setRecords] = useState<Row[]>([]),
     [refs, setRefs] = useState<Record<string, Row[]>>({});
+  const [loadFailed, setLoadFailed] = useState(false);
   const [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -284,6 +311,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const url = `${config.apiUrl}/${kind === "compute" ? "compute" : `local/${kind}`}`;
   async function refresh(lookup = person) {
     setLoading(true);
+    setLoadFailed(false);
     setError("");
     try {
       const result = await requests.get(
@@ -294,6 +322,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       setView(lookup && kind === "compute" ? "grants" : "profiles");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -302,6 +331,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     let active = true;
     setLoading(true);
     setRecords([]);
+    setLoadFailed(false);
     setDraft(null);
     setProfileDetails(null);
     setSearch("");
@@ -315,7 +345,10 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         if (active) setRecords(rowsFrom(r));
       })
       .catch((e) => {
-        if (active) setError(String(e));
+        if (active) {
+          setError(String(e));
+          setLoadFailed(true);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -686,10 +719,36 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       ? ["time", "actor", "kind", "target", "outcome"]
       : kind === "compute"
         ? view === "grants"
-          ? ["id", "profiles", "allowance", "expires", "reason"]
-          : ["id", "name", "cpu", "memory", "gpuMemoryGiB", "enabled"]
+          ? [
+              "id",
+              "profiles",
+              "projects",
+              "allowance",
+              "starts",
+              "expires",
+              "reason",
+            ]
+          : [
+              "id",
+              "name",
+              "execution",
+              "cpu",
+              "memory",
+              "gpuMemoryGiB",
+              "qualification",
+              "enabled",
+            ]
         : kind === "memberships"
-          ? ["person_id", "course_id", "term_id", "role", "expires"]
+          ? [
+              "person_id",
+              "canonical_person_id",
+              "course_id",
+              "term_id",
+              "role",
+              "starts",
+              "expires",
+              "source",
+            ]
           : kind === "workspaces"
             ? ["id", "course_id", "group_id", "profile", "state", "notice"]
             : kind === "assignments"
@@ -712,7 +771,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     time: "Time",
     profiles: "Profiles",
     expires: "Expires",
-    allowance: "Allowance",
+    allowance: "Interactive allowance",
+    starts: "Valid from",
+    canonical_person_id: "Canonical person",
+    execution: "Execution",
+    qualification: "Qualification",
   };
   const writable =
     config.user.admin ||
@@ -742,6 +805,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         )}
       </div>
       {(kind === "compute" || kind === "workspaces") && <PlatformStatusPanel />}
+      {kind === "compute" && (
+        <p className="info-note">
+          The catalog includes interactive notebooks and batch jobs. Profile
+          availability comes from shared policy; GPU qualification and workspace
+          approval must be current. Grants do not activate disabled profiles.
+        </p>
+      )}
       {kind === "compute" && (
         <form
           className="lookup-panel"
@@ -820,6 +890,15 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           <div className="empty-state" role="status">
             Loading {titles[kind].toLowerCase()}…
           </div>
+        ) : loadFailed ? (
+          <div className="empty-state">
+            <AlertCircle size={32} />
+            <h2>Records could not be loaded</h2>
+            <p>Retry to see current records and availability.</p>
+            <button disabled={busy} onClick={() => void refresh()}>
+              Retry loading
+            </button>
+          </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
             <FolderOpen size={32} />
@@ -895,13 +974,17 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         title={display(r[c])}
                         className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
                       >
-                        {[
-                          "state",
-                          "source",
-                          "outcome",
-                          "role",
-                          "enabled",
-                        ].includes(c) ? (
+                        {c === "execution" ? (
+                          execution(r)
+                        ) : c === "qualification" ? (
+                          display((r.gpu as Row | undefined)?.qualification)
+                        ) : [
+                            "state",
+                            "source",
+                            "outcome",
+                            "role",
+                            "enabled",
+                          ].includes(c) ? (
                           <span
                             className={`status-pill ${r[c] === "failure" || r[c] === "denied" ? "bad" : r[c] === "running" || r[c] === "success" || r[c] === true ? "good" : r[c] === false || r[c] === "stopped" || r[c] === "closed" ? "muted" : ""}`}
                           >
@@ -916,7 +999,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                                     (c === "state" ? "open" : undefined)),
                             )}
                           </span>
-                        ) : ["time", "expires"].includes(c) &&
+                        ) : ["time", "starts", "expires"].includes(c) &&
                           r[c] &&
                           !Number.isNaN(Date.parse(String(r[c]))) ? (
                           <time dateTime={String(r[c])}>
@@ -934,6 +1017,25 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     ))}
                     <td>
                       <div className="row-actions">
+                        {kind !== "audit" && (
+                          <details>
+                            <summary>Details</summary>
+                            <dl>
+                              {Object.entries(r)
+                                .filter(([key]) => !columns.includes(key))
+                                .map(([key, value]) => (
+                                  <div key={key}>
+                                    <dt>
+                                      {key
+                                        .replaceAll("_", " ")
+                                        .replace(/^./, (c) => c.toUpperCase())}
+                                    </dt>
+                                    <dd>{display(value)}</dd>
+                                  </div>
+                                ))}
+                            </dl>
+                          </details>
+                        )}
                         {kind === "audit" ? (
                           <details>
                             <summary>Details</summary>
@@ -1307,6 +1409,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                             }
                           />
                         )}
+                        {f.help && <span className="field-help">{f.help}</span>}
                         {f.key === "id" && (
                           <span className="field-help">
                             Stable identifier; cannot be changed after creation.
@@ -1561,6 +1664,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   </button>
                 </div>
               ))}
+            {!profileEditable && <p className="info-note">{profileDetails.state !== "stopped" ? "Stop and reconcile this workspace before changing its compute profile." : "Externally managed or archived workspace profiles are read-only."}</p>}
             <p className="form-intro">
               Profiles are managed through shared compute policy. Starting this
               workspace still checks member permissions, resource ceilings and
