@@ -40,17 +40,34 @@ def audited_mutation(method):
 class LocalCourseProvider:
     capabilities = frozenset({'create', 'update', 'delete'})
 
-    def __init__(self, path, console):
+    def __init__(self, path, console, *, allow_schema_upgrade=True):
         if console not in ('cps', 'cit'):
             raise ValueError('console must be cps or cit')
         self.console = console
         self._importing = False
-        self.db = sqlite3.connect(str(path))
+        if allow_schema_upgrade:
+            self.db = sqlite3.connect(str(path))
+        else:
+            from pathlib import Path
+            if not Path(path).is_file():
+                raise ValueError('Explicit console schema initialization authorization required')
+            self.db = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=rw', uri=True)
         self.db.row_factory = sqlite3.Row
-        if self.db.execute('PRAGMA user_version').fetchone()[0]>7:
+        version = self.db.execute('PRAGMA user_version').fetchone()[0]
+        if version>7:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required = {'records', 'email_links', 'audit', 'console_owner',
+                    'reviewed_account_aliases', 'workspace_accounts'}
+        if not allow_schema_upgrade and (version != 7 or not required <= tables):
+            self.db.close()
+            raise ValueError('Explicit console schema 7 upgrade authorization required')
+        if not allow_schema_upgrade:
+            columns = {row[1] for row in self.db.execute('PRAGMA table_info(email_links)')}
+            if not {'canonical_person_id', 'verified'} <= columns:
+                self.db.close()
+                raise ValueError('Complete reviewed console schema 7 database required')
         owners = set()
         if 'records' in tables:
             owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM records'))
@@ -62,6 +79,9 @@ class LocalCourseProvider:
         if owners - {console}:
             self.db.close()
             raise ValueError('CPS and CIT require separate console SQLite databases')
+        if not allow_schema_upgrade and owners != {console}:
+            self.db.close()
+            raise ValueError('Existing owned console schema 7 database required')
         with self.db:
             self.db.executescript('''
                 BEGIN IMMEDIATE;
@@ -280,12 +300,12 @@ class LocalCourseProvider:
             self.db.backup(target)
 
 
-def configure_provider(config, path, console):
+def configure_provider(config, path, console, *, allow_schema_upgrade=True):
     if config.get('moodle', {}).get('enabled', False):
         return MoodleCourseProvider()
     if not config.get('local', {}).get('enabled', True):
         raise ValueError('v1 requires the local course provider')
-    return LocalCourseProvider(path, console)
+    return LocalCourseProvider(path, console, allow_schema_upgrade=allow_schema_upgrade)
 
 async def reconcile(provider: CourseProvider, apply):
     """Send normalized snapshots to the same workspace/Share reconciliation sink."""

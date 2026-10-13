@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 personal-argo-service = "e2x_course_hub.cps.argo_app:main"
+workspace-account-migration = "e2x_course_hub.cps.account_migration:main"
 
 [project.urls]
 Documentation = "https://github.com/Digiklausur/e2x-course-hub#readme"

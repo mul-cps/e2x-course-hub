@@ -103,6 +103,9 @@ class CourseServiceApp(Application):
     oauth_pkce = Bool(False, help="Enable S256 PKCE when qualified against the Hub OAuth endpoint").tag(config=True)
     console_owner = Unicode('cps', help='Console record owner: cps or cit').tag(config=True)
     database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
+    allow_console_schema_upgrade = Bool(
+        False, help='Authorize console schema 7 initialization/upgrade after reviewed backup; '
+        'disable after cutover').tag(config=True)
     course_providers = Dict(default_value={'local': {'enabled': True}, 'moodle': {'enabled': False}}, help='Course provider configuration').tag(config=True)
 
     neutral_workspace_group = Unicode('', help='Operator-provisioned fixed Hub group granting only the minimum workspace kernel role; empty fails closed').tag(config=True)
@@ -113,7 +116,8 @@ class CourseServiceApp(Application):
     def init_tornado_settings(self):
         CPSHubOAuth.instance().pkce_enabled = self.oauth_pkce
         CPSHubOAuth.instance().cookie_options = {"secure": True, "httponly": True, "samesite": "Lax"}
-        provider = configure_provider(self.course_providers, self.database_path, self.console_owner)
+        provider = configure_provider(self.course_providers, self.database_path, self.console_owner,
+                                      allow_schema_upgrade=self.allow_console_schema_upgrade)
         hub_api = HubAPI(api_token=self.api_token, api_url=self.api_url)
         hub_api.audit_provider = provider
         ensure_initial_config(self.server_config_file)
@@ -133,7 +137,7 @@ class CourseServiceApp(Application):
                 from traitlets.utils.importstring import import_item
                 filesystem = import_item(self.filesystem_adapter_class)()
             accounts = WorkspaceAccountAdapter(provider, hub_api, group=self.neutral_workspace_group,
-                                               role=self.neutral_workspace_role)
+                                               role=self.neutral_workspace_role, compute=compute)
             workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api),
                                                  filesystem=filesystem, accounts=accounts)
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))

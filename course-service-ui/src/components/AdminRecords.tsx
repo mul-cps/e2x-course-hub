@@ -794,7 +794,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               "source",
             ]
           : kind === "workspaces"
-            ? ["id", "course_id", "group_id", "profile", "state", "notice"]
+            ? ["id", "course_id", "group_id", "profile", "state", "account_state", "notice"]
             : kind === "assignments"
               ? ["id", "course_id", "term_id", "mode", "state"]
               : [
@@ -820,6 +820,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     canonical_person_id: "Canonical person",
     execution: "Execution",
     qualification: "Qualification",
+    account_state: "Account",
   };
   const writable =
     config.user.admin ||
@@ -1018,7 +1019,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         title={display(r[c])}
                         className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
                       >
-                        {c === "execution" ? (
+                        {c === "account_state" ? (
+                          display(({ ready: "Account ready", not_provisioned: "Provision on Start", review_required: "Review required", recovery_required: "Recovery required", unavailable: "Status unavailable" } as Record<string, string>)[String(r[c])] ?? "Status unavailable")
+                        ) : c === "execution" ? (
                           execution(r)
                         ) : c === "qualification" ? (
                           display((r.gpu as Row | undefined)?.qualification)

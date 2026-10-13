@@ -16,6 +16,7 @@ class ProviderStartup(unittest.TestCase):
         app.api_url = 'https://hub.invalid/hub/api'
         app.console_owner = owner
         app.database_path = str(directory / 'courses.sqlite')
+        app.allow_console_schema_upgrade = True  # Explicit fixture initialization.
         app.server_config_file = str(directory / 'server.yaml')
         app.course_providers = {
             'local': {'enabled': True},

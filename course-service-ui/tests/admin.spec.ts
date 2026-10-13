@@ -64,6 +64,18 @@ const initial = {
   ],
 };
 let writes: { path: string; body: Record<string, unknown> }[];
+test("workspace account status reflects Source readback without claiming GPU availability", async ({ page }) => {
+  await page.route("**/api/local/workspaces", route => route.fulfill({ json: { records: [
+    { ...initial.workspaces[0], account_state: "review_required" },
+    { ...initial.workspaces[0], id: "ws-b", account_state: "ready" },
+    { ...initial.workspaces[0], id: "ws-c", account_state: "recovery_required" },
+  ] } }));
+  await page.goto("/workspaces");
+  await expect(page.getByRole("columnheader", { name: "Account" })).toBeVisible();
+  await expect(page.getByText("Review required", { exact: true })).toBeVisible();
+  await expect(page.getByText("Account ready", { exact: true })).toBeVisible();
+  await expect(page.getByText("Recovery required", { exact: true })).toBeVisible();
+});
 test("group GPU approval stays pending until component readbacks converge", async ({ page }) => {
   const revision = "sha256:" + "a".repeat(64);
   let approved = false;

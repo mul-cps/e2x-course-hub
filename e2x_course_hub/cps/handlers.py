@@ -70,6 +70,10 @@ class RecordsHandler(BaseAPIHandler):
                 return check.has_permission(permission,course_id=course,term_id=term)
             records=[r for r in records if visible(r)]
             if not check.get_course_ids():raise web.HTTPError(403,reason='Owned course scope required')
+        accounts = getattr(self.settings.get('workspace_service'), 'accounts', None)
+        if kind == 'workspaces' and accounts is not None:
+            records = [{**record, 'account_state': await accounts.status(record)}
+                       for record in records]
         self.write({'records':records})
 
     @web.authenticated

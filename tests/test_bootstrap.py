@@ -23,6 +23,7 @@ class BootstrapTest(unittest.TestCase):
             config=Path(tmp)/'app.py'
             config.write_text(f"c.CourseServiceApp.server_config_file = {str(Path(tmp)/'data/config.yml')!r}\nc.CourseServiceApp.database_path = {str(Path(tmp)/'courses.sqlite')!r}\nc.CourseServiceApp.console_owner = 'cit'\n")
             app=CourseServiceApp()
+            app.allow_console_schema_upgrade=True  # Explicit fixture initialization.
             app.api_token='test-service'
             app.api_url='https://hub.example/hub/api'
             app.initialize(['--config='+str(config)])

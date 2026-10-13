@@ -39,6 +39,43 @@ class ComputeHandler(RecordsHandler):
             provider._audit(actor,'compute-grants',str(data['id']),json.dumps(previous),json.dumps(result))
         self.write(result or {})
 
+class WorkspaceAccountAdoptionHandler(RecordsHandler):
+    """Only an authenticated owning administrator may review or adopt."""
+    @web.authenticated
+    async def post(self, identifier, action):
+        actor = await self.authorize()
+        service = self.settings.get('workspace_service')
+        accounts = getattr(service, 'accounts', None)
+        if accounts is None:
+            raise web.HTTPError(503, reason='Workspace account provisioning is not configured')
+        data = self.body()
+        try:
+            if action == 'plan':
+                if set(data) != {'reason', 'provenance'}:
+                    raise ValueError('Exact reason and provenance fields required')
+                result = await accounts.plan_adoption(identifier, actor=actor, **data)
+            else:
+                review = data.get('review')
+                if (set(data) != {'review'} or not isinstance(review, dict)
+                        or not isinstance(review.get('binding'), dict)
+                        or review['binding'].get('id') != identifier):
+                    raise ValueError('Exact review packet for the route workspace required')
+                result = await accounts.adopt_reviewed(review, actor=actor)
+        except (ValueError, KeyError, TypeError) as error:
+            raise web.HTTPError(400, reason=str(error)) from None
+        except PermissionError as error:
+            raise web.HTTPError(403, reason=str(error)) from None
+        except HTTPClientError as error:
+            raise web.HTTPError(
+                error.code, reason='Owning Hub or gateway rejected adoption preflight') from None
+        except (TimeoutError, RuntimeError, sqlite3.Error):
+            raise web.HTTPError(
+                409, reason='Adoption is incomplete; preserve the review packet '
+                'and retry after reconciliation') from None
+        self.set_header('Cache-Control', 'no-store')
+        self.write(result)
+
+
 class WorkspaceHandler(RecordsHandler):
     @web.authenticated
     async def post(self, identifier, action):
@@ -150,6 +187,8 @@ default_handlers = [
     (r'/api/compute',ComputeHandler),
     (r'/api/assignments/allocate',AssignmentHandler),
     (r'/api/workspaces/([^/]+)/(start|stop|remove-member|profile)',WorkspaceHandler),
+    (r'/api/workspace-account-adoptions/([A-Za-z0-9_.-]{1,128})/(plan|execute)',
+     WorkspaceAccountAdoptionHandler),
     (r'/api/native-group-approvals',NativeGroupApprovalHandler),
     (r'/api/native-group-approvals/([A-Za-z0-9_.-]{1,128})/(approve|revoke)',NativeGroupApprovalHandler),
 ]
