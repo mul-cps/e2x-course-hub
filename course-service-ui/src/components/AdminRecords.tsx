@@ -207,6 +207,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const [removeMember, setRemoveMember] = useState<Row | null>(null),
     [membership, setMembership] = useState("");
   const [profileDetails, setProfileDetails] = useState<Row | null>(null);
+  const [groupApproval, setGroupApproval] = useState<Row | null>(null);
+  const [approvalProfile, setApprovalProfile] = useState("");
+  const [approvalError, setApprovalError] = useState("");
   const [profileDiscovery, setProfileDiscovery] = useState<{
     workspace: string;
     loading: boolean;
@@ -429,6 +432,47 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const storedProfileAvailable = detailProfiles.some(
     (profile) => profile.id === profileDetails?.profile,
   );
+  useEffect(() => {
+    setGroupApproval(null);
+    setApprovalError("");
+    setApprovalProfile("");
+    if (kind !== "workspaces" || !profileDetails) return;
+    let active = true;
+    requests.get(`${config.apiUrl}/native-group-approvals`).then((result) => {
+      const registry = result as Row;
+      const valid = registry && typeof registry.revision === "string" &&
+        /^sha256:[0-9a-f]{64}$/.test(registry.revision) &&
+        typeof registry.ready === "boolean" && Array.isArray(registry.qualified_profiles) &&
+        registry.qualified_profiles.every((profile) => typeof profile === "string") &&
+        registry.approvals && typeof registry.approvals === "object" && !Array.isArray(registry.approvals);
+      if (active) setGroupApproval(valid ? registry : null);
+    }).catch(() => {
+      // The backend reserves qualification changes for console administrators.
+      if (active) setGroupApproval(null);
+    });
+    return () => { active = false; };
+  }, [kind, profileDetails]);
+  const qualifiedProfiles = Array.isArray(groupApproval?.qualified_profiles)
+    ? groupApproval.qualified_profiles.filter((value): value is string => typeof value === "string")
+    : [];
+  const approvedGroup = (groupApproval?.approvals as Record<string, Row> | undefined)?.[String(profileDetails?.id)];
+  async function updateGroupApproval(revoke = false) {
+    if (!profileDetails || !groupApproval || busy || (!revoke && !approvalProfile)) return;
+    setBusy(true);
+    setApprovalError("");
+    try {
+      await requests.post(
+        `${config.apiUrl}/native-group-approvals/${encodeURIComponent(String(profileDetails.id))}/${revoke ? "revoke" : "approve"}`,
+        { expected_revision: groupApproval.revision, ...(!revoke ? { profile: approvalProfile } : {}) },
+      );
+      await refresh();
+      setProfileDetails({ ...profileDetails });
+    } catch (e) {
+      setApprovalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function mutate(run: () => Promise<unknown>, message: string) {
     setBusy(true);
     setError("");
@@ -1238,7 +1282,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           >
             <div className="dialog-heading">
               <div>
-                <p className="eyebrow">Read-only details</p>
+                <p className="eyebrow">Compute policy</p>
                 <h2 id="profile-details-title">Workspace compute profile</h2>
               </div>
               <button
@@ -1301,6 +1345,39 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               workspace still checks member permissions, resource ceilings and
               reservations.
             </p>
+            {groupApproval && (
+              <div className="form-grid" data-testid="workspace-gpu-approval">
+                <div className="full-width">
+                  <h3>Group GPU approval</h3>
+                  <p role="status">
+                    {approvedGroup
+                      ? groupApproval.ready === true
+                        ? "Approved configuration is loaded by both Hubs, the gateway and the GPU node."
+                        : "Approval saved. Activation is waiting for both Hubs, the gateway and the GPU node."
+                      : "This workspace does not have a GPU approval."}
+                  </p>
+                  <p className="form-intro">
+                    Stop the workspace before changing its approval. Approval checks the course ceiling,
+                    neutral account, storage and reviewed member identities. Members also need current
+                    compute grants before Start; each member contributes one interactive allowance.
+                  </p>
+                </div>
+                <label>
+                  Qualified shared GPU profile
+                  <select value={approvalProfile} onChange={(e) => setApprovalProfile(e.target.value)} disabled={busy}>
+                    <option value="">Select profile</option>
+                    {qualifiedProfiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
+                  </select>
+                </label>
+                <div className="dialog-actions">
+                  <button disabled={busy || !approvalProfile} onClick={() => void updateGroupApproval()}>
+                    {busy ? "Saving…" : "Approve GPU profile"}
+                  </button>
+                  {approvedGroup && <button disabled={busy} onClick={() => void updateGroupApproval(true)}>Revoke GPU approval</button>}
+                </div>
+                {approvalError && <p className="full-width" role="alert">{approvalError}</p>}
+              </div>
+            )}
           </section>
         </div>
       )}

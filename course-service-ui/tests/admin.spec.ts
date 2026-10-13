@@ -64,6 +64,47 @@ const initial = {
   ],
 };
 let writes: { path: string; body: Record<string, unknown> }[];
+
+test("group GPU approval stays pending until component readbacks converge", async ({ page }) => {
+  const revision = "sha256:" + "a".repeat(64);
+  let approved = false;
+  const mutations: Record<string, unknown>[] = [];
+  await page.route((url) => url.pathname.startsWith("/api/native-group-approvals"), async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      mutations.push(request.postDataJSON());
+      approved = true;
+      await route.fulfill({ json: { revision: "sha256:" + "b".repeat(64), ready: false } });
+    } else {
+      await route.fulfill({ json: {
+        revision: approved ? "sha256:" + "b".repeat(64) : revision,
+        ready: false,
+        qualified_profiles: ["interactive-shared-5", "interactive-shared-10"],
+        approvals: approved ? { "ws-a": { profiles: ["interactive-shared-5"] } } : {},
+      } });
+    }
+  });
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "View workspace profile ws-a", exact: true }).click();
+  const panel = page.getByTestId("workspace-gpu-approval");
+  await expect(panel).toBeVisible();
+  await panel.getByLabel("Qualified shared GPU profile").selectOption("interactive-shared-5");
+  await panel.getByRole("button", { name: "Approve GPU profile", exact: true }).click();
+  await expect(panel.getByText("Approval saved. Activation is waiting for both Hubs, the gateway and the GPU node.")).toBeVisible();
+  expect(mutations).toEqual([{ profile: "interactive-shared-5", expected_revision: revision }]);
+  await expect(panel.getByRole("button", { name: "Revoke GPU approval" })).toBeVisible();
+  await expect(panel.getByText("Approved configuration is loaded", { exact: false })).toHaveCount(0);
+});
+
+test("non-administrators receive no group qualification controls", async ({ page }) => {
+  await page.route((url) => url.pathname === "/api/native-group-approvals", (route) =>
+    route.fulfill({ status: 403, json: { message: "Console administrator required" } }));
+  await page.goto("/workspaces");
+  await page.getByRole("button", { name: "View workspace profile ws-a", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Workspace compute profile" })).toBeVisible();
+  await expect(page.getByTestId("workspace-gpu-approval")).toHaveCount(0);
+});
+
 test.beforeEach(async ({ page }) => {
   writes = [];
   const data = structuredClone(initial) as Record<

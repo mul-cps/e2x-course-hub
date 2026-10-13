@@ -27,11 +27,19 @@ class ComputePolicyClient:
             method=method,
             headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'},
             body=json.dumps(payload).encode() if payload is not None else None,
+            allow_nonstandard_methods=(method == 'DELETE' and payload is not None),
             request_timeout=20))
         return json.loads(response.body) if response.body else None
 
     async def grants(self, person):
         return await self._request('grants/' + quote(person, safe=''))
+
+    async def native_group_approvals(self):
+        return await self._request('native-group-approvals')
+
+    async def mutate_native_group_approval(self, workspace, body, *, revoke=False):
+        return await self._request('native-group-approvals/' + quote(workspace, safe=''),
+                                   'DELETE' if revoke else 'PUT', body)
 
     async def put_grant(self, grant, *, actor):
         if grant.get('source', self.console) != self.console:

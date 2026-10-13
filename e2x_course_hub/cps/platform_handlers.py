@@ -63,6 +63,42 @@ class WorkspaceHandler(RecordsHandler):
         except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
         self.write({'workspace':await service.get(identifier)})
 
+class NativeGroupApprovalHandler(RecordsHandler):
+    """Console administrators request scoped qualification; gateway owns it."""
+    def client(self):
+        client = self.settings.get('compute_policy')
+        if client is None:
+            raise web.HTTPError(503, reason='Shared compute service not configured')
+        return client
+
+    @web.authenticated
+    async def get(self):
+        await self.authorize()
+        try:
+            self.write(await self.client().native_group_approvals())
+        except HTTPClientError as error:
+            raise web.HTTPError(error.code, reason='Group approval registry unavailable') from None
+
+    @web.authenticated
+    async def post(self, identifier, action):
+        actor = await self.authorize()
+        client = self.client()
+        data = self.body()
+        fields = {'expected_revision'} if action == 'revoke' else {'expected_revision', 'profile'}
+        if (set(data) != fields or any(not isinstance(data[key], str) or
+                not 1 <= len(data[key]) <= 128 for key in fields)):
+            raise web.HTTPError(400, reason='Exact profile and approval revision fields required')
+        provider = self.settings['course_provider']
+        try:
+            previous = await client.native_group_approvals()
+            result = await client.mutate_native_group_approval(identifier, data, revoke=action == 'revoke')
+        except HTTPClientError as error:
+            provider.denial(actor, 'native-group-approvals', identifier, data, 'denied')
+            raise web.HTTPError(error.code, reason='Shared compute policy rejected group approval') from None
+        with provider.db:
+            provider._audit(actor, 'native-group-approvals', identifier, json.dumps(previous), json.dumps(result))
+        self.write(result or {})
+
 class AssignmentHandler(RecordsHandler):
     @web.authenticated
     async def post(self):
@@ -98,6 +134,8 @@ default_handlers = [
     (r'/api/compute',ComputeHandler),
     (r'/api/assignments/allocate',AssignmentHandler),
     (r'/api/workspaces/([^/]+)/(start|stop|remove-member|profile)',WorkspaceHandler),
+    (r'/api/native-group-approvals',NativeGroupApprovalHandler),
+    (r'/api/native-group-approvals/([A-Za-z0-9_.-]{1,128})/(approve|revoke)',NativeGroupApprovalHandler),
 ]
 default_handlers += status_handlers
 
