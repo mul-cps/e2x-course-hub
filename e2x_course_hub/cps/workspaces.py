@@ -341,6 +341,7 @@ class WorkspaceService:
     async def start(self, identifier, *, actor):
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
+            expected_lifecycle = self.provider.lifecycle_snapshot(workspace['course_id'])
             original = workspace
             if workspace.get('state','stopped') != 'stopped':
                 raise ValueError('Workspace lifecycle is unresolved; observed Stop/reconciliation required')
@@ -348,6 +349,7 @@ class WorkspaceService:
                 raise ValueError('Archived workspace cannot restart a writer')
             group=next((g for g in await self.provider.groups(workspace['course_id']) if g['id']==workspace['group_id']),{})
             assignment_id=workspace.get('assignment_id') or group.get('assignment_id')
+            assignment = None
             if assignment_id:
                 assignment=next((a for a in await self.provider.list('assignments') if a['id']==assignment_id),None)
                 if not assignment or assignment.get('state','open') != 'open' or assignment.get('archive_pending'):
@@ -370,14 +372,16 @@ class WorkspaceService:
             members = await self.members(workspace)
             validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
             await self._ensure_account(workspace,actor=actor)
+            await self.hub.assert_stopped(workspace)
             if (await self.get(identifier) != original
                     or next((c for c in await self.provider.courses() if c['id']==course['id']),None) != course
                     or next((g for g in await self.provider.groups(course['id']) if g['id']==group.get('id')),None) != group
-                    or await self.members(workspace) != members):
-                raise ValueError('Workspace, owned course binding or membership changed during account preparation')
-            await self.hub.assert_stopped(workspace)
+                    or await self.members(workspace) != members
+                    or next((a for a in await self.provider.list('assignments') if a['id']==assignment_id),None) != assignment):
+                raise ValueError('Workspace, owned course binding, membership or assignment changed during account preparation')
             # Persist the guard before asynchronous provisioning/registration/Hub calls.
-            await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor)
+            await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor,
+                                    expected_lifecycle=expected_lifecycle)
             try:
                 registration = await self.compute.register_workspace(workspace,members,validation)
                 await self.filesystem.provision(workspace,actor=actor)

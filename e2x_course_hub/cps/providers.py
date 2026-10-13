@@ -107,8 +107,20 @@ class LocalCourseProvider:
     def _kind(self, kind):
         if kind not in KINDS: raise ValueError('unknown record kind')
 
+    def lifecycle_snapshot(self, course_id):
+        """Capture course authority for an atomic lifecycle guard, excluding account receipts/audit."""
+        records = tuple(tuple(row) for row in self.db.execute(
+            "SELECT kind,id,payload FROM records WHERE console=? AND "
+            "((kind='courses' AND id=?) OR json_extract(payload,'$.course_id')=?) ORDER BY kind,id",
+            (self.console, course_id, course_id)))
+        links = tuple(tuple(row) for row in self.db.execute(
+            'SELECT * FROM email_links WHERE console=? ORDER BY username', (self.console,)))
+        aliases = tuple(tuple(row) for row in self.db.execute(
+            'SELECT * FROM reviewed_account_aliases WHERE console=? ORDER BY username', (self.console,)))
+        return {'course_id': course_id, 'records': records, 'links': links, 'aliases': aliases}
+
     @audited_mutation
-    async def put(self, kind, record, *, actor):
+    async def put(self, kind, record, *, actor, expected_lifecycle=None):
         self._kind(kind)
         record = dict(record)
         identifier = record['id']
@@ -135,7 +147,15 @@ class LocalCourseProvider:
         from .validation import validate
         record = await validate(self,kind,record)
         payload = json.dumps(record, sort_keys=True)
+        if expected_lifecycle is not None and (kind != 'workspaces' or self._importing or self.db.in_transaction
+                or expected_lifecycle['course_id'] != record.get('course_id')):
+            raise ValueError('Conditional lifecycle write requires an independent workspace transaction')
         with (nullcontext() if self._importing else self.db):
+            if expected_lifecycle is not None:
+                # No awaits between obtaining the writer lock, checking authority and persisting the guard.
+                self.db.execute('BEGIN IMMEDIATE')
+                if self.lifecycle_snapshot(record['course_id']) != expected_lifecycle:
+                    raise ValueError('Source course authority changed before the lifecycle guard')
             self.db.execute('INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?)', (self.console, kind, identifier, payload))
             self._audit(actor, kind, identifier, previous['payload'] if previous else None, payload)
         return record

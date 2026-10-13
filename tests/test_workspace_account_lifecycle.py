@@ -3,6 +3,7 @@ import json
 import unittest
 
 from e2x_course_hub.cps.accounts import WorkspaceAccountAdapter
+from e2x_course_hub.cps.providers import LocalCourseProvider
 from test_workspace_accounts import HubFixture
 import test_workspace_native_prepare as preparation
 
@@ -86,3 +87,70 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.service.get('w'))['state'], 'running')
         self.assertIn('register', self.calls)
         self.assertIn('provision', self.calls)
+
+    async def _start_assignment_fixture(self):
+        await self.provider.put('assignments', {'id': 'a', 'course_id': 'c', 'term_id': 't',
+                                               'state': 'open', 'mode': 'group'}, actor='admin')
+        await self.provider.put('workspaces', {**await self.service.get('w'), 'assignment_id': 'a'},
+                                actor='admin')
+        async def allow(*args):
+            pass
+        self.hub.sync_group = self.hub.start = self.hub.replace_shares = allow
+
+    async def _assert_start_denied_with_account_preserved(self):
+        with self.assertRaises(ValueError):
+            await self.service.start('w', actor='instructor')
+        self.assertIn('neutral-new', self.api.users)
+        self.assertEqual((await self.service.get('w'))['state'], 'stopped')
+        self.assertEqual((await self.provider.list('assignments'))[0]['state'], 'closed')
+        self.assertNotIn('register', self.calls)
+        self.assertNotIn('provision', self.calls)
+
+    async def test_assignment_closure_during_account_creation_blocks_start(self):
+        await self._start_assignment_fixture()
+        original = self.api.create_user
+        async def close_assignment(name):
+            result = await original(name)
+            await self.provider.put('assignments', {'id': 'a', 'state': 'closed'}, actor='admin')
+            return result
+        self.api.create_user = close_assignment
+        await self._assert_start_denied_with_account_preserved()
+
+    async def test_assignment_closure_during_final_hub_stop_check_blocks_start(self):
+        await self._start_assignment_fixture()
+        async def close_assignment(workspace):
+            await self.provider.put('assignments', {'id': 'a', 'state': 'closed'}, actor='admin')
+        self.hub.assert_stopped = close_assignment
+        await self._assert_start_denied_with_account_preserved()
+
+    async def test_assignment_closure_after_final_check_blocks_conditional_guard_across_instances(self):
+        await self._start_assignment_fixture()
+        other = LocalCourseProvider(self.provider.db.execute('PRAGMA database_list').fetchone()[2], 'cps')
+        original = self.provider.put
+        async def race(kind, record, **kwargs):
+            if kind == 'workspaces' and record.get('state') == 'starting':
+                await other.put('assignments', {'id': 'a', 'state': 'closed'}, actor='admin')
+            return await original(kind, record, **kwargs)
+        self.provider.put = race
+        try:
+            await self._assert_start_denied_with_account_preserved()
+        finally:
+            other.db.close()
+
+    async def test_same_snapshot_cannot_persist_two_cross_instance_start_guards(self):
+        await self._start_assignment_fixture()
+        other = LocalCourseProvider(self.provider.db.execute('PRAGMA database_list').fetchone()[2], 'cps')
+        workspace = await self.service.get('w')
+        expected = self.provider.lifecycle_snapshot('c')
+        try:
+            await self.provider.put('workspaces', {**workspace, 'state': 'starting'}, actor='instructor',
+                                    expected_lifecycle=expected)
+            with self.assertRaises(ValueError):
+                await other.put('workspaces', {**workspace, 'state': 'starting'}, actor='other-instructor',
+                                expected_lifecycle=expected)
+            self.assertEqual((await self.service.get('w'))['state'], 'starting')
+            self.assertFalse(other.db.in_transaction)
+            self.assertTrue(any(row['actor'] == 'other-instructor' and row['outcome'] == 'failure'
+                                for row in other.audit()))
+        finally:
+            other.db.close()
