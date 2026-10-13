@@ -160,7 +160,7 @@ class ReviewedAdoption:
     async def _central(self, binding, *, cleanup, actor):
         registration = await self.compute.workspace_registration(binding["id"])
         expected = {
-            "principal": "workspace:" + self.provider.console + ":" + binding["hub_user"],
+            "principal": "workspace:" + self.provider.console + ":" + binding["id"],
             "workspace": binding["id"],
             "owner": binding["hub_user"],
             "server": binding["hub_server"],

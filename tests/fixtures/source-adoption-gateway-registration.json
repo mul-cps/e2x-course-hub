@@ -1,0 +1,18 @@
+{
+  "ceiling": {"cpu": "4", "memory": "16Gi"},
+  "course_id": "c",
+  "group_id": "g",
+  "members": ["fictional-person"],
+  "namespace": "jupyterhub",
+  "owner": "legacy-owner",
+  "pod": "jupyter-legacy-owner--rtc",
+  "policy_hash": "fictional-policy-hash",
+  "principal": "workspace:cps:w",
+  "profiles": ["interactive-cpu"],
+  "server": "rtc",
+  "storage": {"pvc": "retained-pvc", "version": 1},
+  "term_id": "t",
+  "workspace": "w",
+  "workspace_hash": "fictional-workspace-hash",
+  "workspace_label": "fictional-label"
+}

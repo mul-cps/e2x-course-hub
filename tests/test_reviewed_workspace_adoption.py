@@ -65,19 +65,11 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.gate = None
         self.cleanup_change = False
         self.reservation = {"active": False, "attempt": None}
-        self.registration = {
-            "source": "cps",
-            "principal": "workspace:cps:legacy-owner",
-            "workspace": "w",
-            "owner": "legacy-owner",
-            "server": "rtc",
-            "namespace": "jupyterhub",
-            "pod": "jupyter-legacy-owner--rtc",
-            "course_id": "c",
-            "term_id": "t",
-            "group_id": "g",
-            "storage": {"pvc": "retained-pvc", "version": 1},
-        }
+        self.registration = json.loads(
+            (Path(__file__).parent / "fixtures" / "source-adoption-gateway-registration.json")
+            .read_text()
+        )
+        self.registration["source"] = "cps"
         outer = self
 
         class Compute:
@@ -151,14 +143,6 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_registration_principal_scopes_source_without_invented_field(self):
         self.registration.pop("source")
-        self.registration.update({
-            "ceiling": {"mode": "cpu"},
-            "members": [],
-            "policy_hash": "fictional-policy-hash",
-            "profiles": ["interactive-cpu"],
-            "workspace_hash": "fictional-workspace-hash",
-            "workspace_label": "fictional-label",
-        })
         before = copy.deepcopy(self.registration)
         packet = await self.plan()
         self.assertEqual(packet["registration"], before)
@@ -177,14 +161,14 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
             else:
                 self.registration.pop("source", None)
             for principal in (
-                "workspace:cit:legacy-owner", "workspace:cps:foreign-owner",
-                "workspace:cps:legacy-owner:suffix", "service:cps", None,
+                "workspace:cit:w", "workspace:cps:foreign-workspace",
+                "workspace:cps:legacy-owner", "workspace:cps:w:suffix", "service:cps", None,
             ):
                 self.registration["principal"] = principal
                 with self.subTest(source=with_source, principal=principal):
                     with self.assertRaises(PermissionError):
                         await self.plan()
-        self.registration["principal"] = "workspace:cps:legacy-owner"
+        self.registration["principal"] = "workspace:cps:w"
         self.registration["source"] = "cit"
         with self.assertRaises(PermissionError):
             await self.plan()

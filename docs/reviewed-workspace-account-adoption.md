@@ -114,11 +114,21 @@ Source route ending in `/plan`, with only `reason` and `provenance`. Source
 compares the supplied packet to fresh trusted Hub/gateway/Source observations.
 Gateway registration is read through the configured source-scoped authenticated
 internal GET route. Its principal must exactly equal
-`workspace:<owning-console>:<permanent-owner>`, together with the exact workspace,
+`workspace:<owning-console>:<workspace-id>`, together with the exact workspace,
 owner, server, namespace and Pod binding. Retained legacy registrations may omit
 `source`; when that field exists it must also equal the owning console. The full
 raw registration and storage remain in the review and must survive cleanup
 unchanged. No `source` field is invented and no registration PUT is performed.
+The dedicated Hub owner is checked separately and cannot replace the workspace
+ID in the principal. The shared fictional registration fixture is also checked
+against the actual pinned gateway SDK's `validate_workspace_registration`, not
+an equivalent Source implementation. Run that compatibility check explicitly
+with the gateway's dependencies and source checkout:
+
+```sh
+PYTHONPATH=/path/to/pinned/cps-compute/src /path/to/gateway-env/bin/python \
+  -m unittest discover -s tests -p gateway_contract_workspace_adoption.py -q
+```
 The CLI requires HTTPS and protected owned files, refuses symlinks and redirects,
 and prints no tokens, identities, user/email lists or server response bodies.
 
