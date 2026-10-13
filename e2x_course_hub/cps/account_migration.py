@@ -1,6 +1,7 @@
 """Plan by default; execute a protected review through the owning Source API."""
 
 import argparse
+import http.cookiejar
 import json
 import os
 import stat
@@ -8,6 +9,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 from .account_adoption import encode
@@ -60,16 +62,28 @@ def request(source_url, token, path, body):
         or parsed.fragment
     ):
         raise ValueError("Exact HTTPS owning Source URL required")
-    response = urllib.request.build_opener(NoRedirect()).open(
-        urllib.request.Request(
-            source_url.rstrip("/") + "/api/" + path,
-            data=encode(body).encode(),
-            method="POST",
-            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-        ),
-        timeout=30,
+    base = source_url.rstrip("/")
+    cookies = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(cookies))
+    authorization = {"Authorization": "Bearer " + token}
+    with opener.open(
+        urllib.request.Request(base + "/app", headers=authorization), timeout=30
+    ) as bootstrap:
+        if len(bootstrap.read(1024 * 1024 + 1)) > 1024 * 1024:
+            raise ValueError("Source bootstrap response is too large")
+    post = urllib.request.Request(
+        base + "/api/" + path,
+        data=encode(body).encode(),
+        method="POST",
+        headers={**authorization, "Content-Type": "application/json"},
     )
-    with response:
+    cookies.add_cookie_header(post)
+    applicable = SimpleCookie(post.get_header("Cookie", ""))
+    xsrf = applicable.get("_xsrf")
+    if xsrf is None or not xsrf.value:
+        raise ValueError("Authenticated Source bootstrap did not supply an applicable XSRF cookie")
+    post.add_header("X-XSRFToken", xsrf.value)
+    with opener.open(post, timeout=30) as response:
         raw = response.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024:
         raise ValueError("Source review response is too large")

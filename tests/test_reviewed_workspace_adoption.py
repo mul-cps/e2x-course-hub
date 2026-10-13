@@ -67,6 +67,7 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.reservation = {"active": False, "attempt": None}
         self.registration = {
             "source": "cps",
+            "principal": "workspace:cps:legacy-owner",
             "workspace": "w",
             "owner": "legacy-owner",
             "server": "rtc",
@@ -147,6 +148,50 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
         await self.adapter.adopt_reviewed(await self.plan(), actor="operator")
         await self.adapter.ensure(bound, actor="operator")
         self.assertEqual(self.hub.created, [])
+
+    async def test_legacy_registration_principal_scopes_source_without_invented_field(self):
+        self.registration.pop("source")
+        self.registration.update({
+            "ceiling": {"mode": "cpu"},
+            "members": [],
+            "policy_hash": "fictional-policy-hash",
+            "profiles": ["interactive-cpu"],
+            "workspace_hash": "fictional-workspace-hash",
+            "workspace_label": "fictional-label",
+        })
+        before = copy.deepcopy(self.registration)
+        packet = await self.plan()
+        self.assertEqual(packet["registration"], before)
+        self.assertNotIn("source", packet["registration"])
+        await self.adapter.adopt_reviewed(packet, actor="operator")
+        self.assertEqual(self.registration, before)
+        receipt = json.loads(
+            self.provider.db.execute("SELECT receipt FROM workspace_accounts").fetchone()[0]
+        )
+        self.assertEqual(receipt["review"]["registration"], before)
+
+    async def test_foreign_or_missing_registration_principal_cannot_claim_owning_source(self):
+        for with_source in (False, True):
+            if with_source:
+                self.registration["source"] = "cps"
+            else:
+                self.registration.pop("source", None)
+            for principal in (
+                "workspace:cit:legacy-owner", "workspace:cps:foreign-owner",
+                "workspace:cps:legacy-owner:suffix", "service:cps", None,
+            ):
+                self.registration["principal"] = principal
+                with self.subTest(source=with_source, principal=principal):
+                    with self.assertRaises(PermissionError):
+                        await self.plan()
+        self.registration["principal"] = "workspace:cps:legacy-owner"
+        self.registration["source"] = "cit"
+        with self.assertRaises(PermissionError):
+            await self.plan()
+        self.assertEqual(self.hub.added, [])
+        self.assertEqual(
+            self.provider.db.execute("SELECT COUNT(*) FROM workspace_accounts").fetchone()[0], 0
+        )
 
     async def test_exact_review_and_actor_source_binding_and_identity_are_required(self):
         packet = await self.plan()

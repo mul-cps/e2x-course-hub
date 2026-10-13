@@ -73,6 +73,11 @@ access this console service, in an owned private regular file. A console service
 token is not an administrator impersonation mechanism. Bearer authentication
 uses the existing Hub-authenticated service flow; the backend rechecks current
 administrator status and binds the review to that actor.
+Before each JSON POST the CLI makes an authenticated HTTPS GET to the same
+Source prefix's `/app`, retains applicable cookies only in memory, and supplies
+the returned `_xsrf` cookie and `X-XSRFToken` header. Missing or inapplicable XSRF
+cookies and all bootstrap/POST redirects fail closed. It does not launch browser
+OAuth or bypass the server's XSRF checks.
 
 ```sh
 umask 077
@@ -107,6 +112,13 @@ It forwards the exact protected packet to
 `POST /api/workspace-account-adoptions/<id>/execute`; plan uses the same owning
 Source route ending in `/plan`, with only `reason` and `provenance`. Source
 compares the supplied packet to fresh trusted Hub/gateway/Source observations.
+Gateway registration is read through the configured source-scoped authenticated
+internal GET route. Its principal must exactly equal
+`workspace:<owning-console>:<permanent-owner>`, together with the exact workspace,
+owner, server, namespace and Pod binding. Retained legacy registrations may omit
+`source`; when that field exists it must also equal the owning console. The full
+raw registration and storage remain in the review and must survive cleanup
+unchanged. No `source` field is invented and no registration PUT is performed.
 The CLI requires HTTPS and protected owned files, refuses symlinks and redirects,
 and prints no tokens, identities, user/email lists or server response bodies.
 

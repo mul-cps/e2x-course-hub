@@ -160,7 +160,7 @@ class ReviewedAdoption:
     async def _central(self, binding, *, cleanup, actor):
         registration = await self.compute.workspace_registration(binding["id"])
         expected = {
-            "source": self.provider.console,
+            "principal": "workspace:" + self.provider.console + ":" + binding["hub_user"],
             "workspace": binding["id"],
             "owner": binding["hub_user"],
             "server": binding["hub_server"],
@@ -170,6 +170,7 @@ class ReviewedAdoption:
         if (
             not isinstance(registration, dict)
             or any(registration.get(k) != v for k, v in expected.items())
+            or ("source" in registration and registration["source"] != self.provider.console)
             or any(
                 k in registration and registration[k] != binding[k]
                 for k in ("course_id", "term_id", "group_id")
