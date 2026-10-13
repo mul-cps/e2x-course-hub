@@ -237,6 +237,61 @@ class CourseStartConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.calls.index('release'), self.calls.index('shares'))
         self.assertEqual(await self.provider.members('c'), [])
 
+    async def test_queued_removal_waits_for_shares_publication_and_blocks_new_readers(self):
+        await self.add_workspace('w2', 'g2')
+        publishing, published = asyncio.Event(), asyncio.Event()
+        original_shares = self.hub.replace_shares
+
+        async def spawn(workspace):
+            self.assertEqual((await self.service.get(workspace['id']))['state'], 'starting')
+            self.calls.append('spawn:' + workspace['id'])
+
+        async def shares(workspace, group):
+            if workspace['id'] == 'w' and not published.is_set():
+                publishing.set()
+                await published.wait()
+            await original_shares(workspace, group)
+
+        self.hub.start, self.hub.replace_shares = spawn, shares
+        start = self.task(self.service.start('w', actor='teacher'))
+        await publishing.wait()
+        removal = self.task(self.service.remove_member('w', 'm', actor='teacher'))
+        await asyncio.sleep(0)
+        late = self.task(self.service.start('w2', actor='teacher'))
+        await asyncio.sleep(0)
+        self.assertEqual((await self.service.get('w'))['state'], 'starting')
+        self.assertEqual((await self.service.get('w2')).get('state', 'stopped'), 'stopped')
+        self.assertNotIn('remove', self.calls)
+        self.assertFalse(start.done())
+        published.set()
+        await asyncio.wait_for(asyncio.gather(start, removal, late), 1)
+        self.assertLess(self.calls.index('shares'), self.calls.index('stop:w'))
+        self.assertLess(self.calls.index('remove'), self.calls.index('spawn:w2'))
+        self.assertEqual((await self.service.get('w2'))['state'], 'running')
+
+    async def test_cancelled_shares_publication_keeps_guard_for_stop_before_removal(self):
+        publishing = asyncio.Event()
+        original_shares = self.hub.replace_shares
+
+        async def shares(workspace, group):
+            if not publishing.is_set():
+                publishing.set()
+                await asyncio.Event().wait()
+            await original_shares(workspace, group)
+
+        self.hub.replace_shares = shares
+        start = self.task(self.service.start('w', actor='teacher'))
+        await publishing.wait()
+        start.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await start
+        self.assertEqual((await self.service.get('w'))['state'], 'starting')
+        self.assertNotIn('shares', self.calls)
+        await asyncio.wait_for(self.service.remove_member('w', 'm', actor='teacher'), 1)
+        self.assertLess(self.calls.index('stop:w'), self.calls.index('remove'))
+        self.assertLess(self.calls.index('release'), self.calls.index('shares'))
+        self.assertEqual(await self.provider.members('c'), [])
+
 
 class CourseOperationLockTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_writer_blocks_new_readers(self):
