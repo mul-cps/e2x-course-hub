@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack
 from urllib.parse import quote
 from tornado.httpclient import HTTPClientError
 from .compute import NativeCleanupPending
+from .course_locks import CourseOperationLock
 
 def audited_lifecycle(method):
     @wraps(method)
@@ -20,7 +21,9 @@ def audited_lifecycle(method):
             raise
     return wrapped
 
-def course_serialized(method):
+def course_serialized(method=None, *, shared=False):
+    if method is None:
+        return lambda decorated: course_serialized(decorated, shared=shared)
     @wraps(method)
     async def wrapped(self, identifier, *args, **kwargs):
         if isinstance(identifier,dict):
@@ -29,7 +32,8 @@ def course_serialized(method):
             course_id = (await self.get(identifier))['course_id']
         if not course_id:
             raise ValueError('Owned course required for lifecycle serialization')
-        async with self.course_locks.setdefault(course_id,asyncio.Lock()):
+        lock = self.course_locks.setdefault(course_id,CourseOperationLock())
+        async with lock.read() if shared else lock.write():
             return await method(self,identifier,*args,**kwargs)
     return wrapped
 
@@ -337,11 +341,14 @@ class WorkspaceService:
             return await self.provider.put('workspaces',proposed,actor=actor)
 
     @audited_lifecycle
-    @course_serialized
+    @course_serialized(shared=True)
     async def start(self, identifier, *, actor):
+        # A shared course lease spans spawn, access publication and failure cleanup.
+        # HTTP authorization still happens in the existing handler before this lease.
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
-            expected_lifecycle = self.provider.lifecycle_snapshot(workspace['course_id'])
+            expected_lifecycle = self.provider.lifecycle_snapshot(
+                workspace['course_id'], workspace_id=identifier)
             original = workspace
             if workspace.get('state','stopped') != 'stopped':
                 raise ValueError('Workspace lifecycle is unresolved; observed Stop/reconciliation required')

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from e2x_course_hub.cps.providers import LocalCourseProvider, reconcile
 from e2x_course_hub.cps.workspaces import WorkspaceService
+from e2x_course_hub.cps.course_locks import CourseOperationLock
 from e2x_course_hub.cps.compute import ComputePolicyClient
 from e2x_course_hub.cps.identity import reviewed_email_mapping
 
@@ -417,8 +418,9 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.provider.courses())[0]['reconciliation_pending'])
 
     async def test_writer_snapshot_is_collected_after_course_serialization(self):
-        lock=self.service.course_locks.setdefault('c',asyncio.Lock())
-        await lock.acquire()
+        lock=self.service.course_locks.setdefault('c',CourseOperationLock())
+        lease=lock.write()
+        await lease.__aenter__()
         course=(await self.provider.courses())[0]
         snapshot={'course':course,'groups':[{'id':'g'}],
                   'members':await self.provider.members('c'),'groupings':[]}
@@ -428,7 +430,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         await self.provider.put('workspaces',{**workspace,'id':'w2','hub_server':'rtc2'},actor='admin')
         await self.provider.put('courses',{**course,'workspace_bindings':course['workspace_bindings']+
             [{**course['workspace_bindings'][0],'hub_server':'rtc2'}]},actor='admin')
-        lock.release()
+        await lease.__aexit__(None,None,None)
         await asyncio.wait_for(reconciliation,2)
         self.assertLess(self.calls.index('stop:w2'),self.calls.index('sync'))
 
