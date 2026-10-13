@@ -37,6 +37,26 @@ def audited_mutation(method):
             raise
     return wrapped
 
+def _validate_workspace_account_schema(db):
+    """Existing permanent ownership must retain the actual database exclusion."""
+    columns = db.execute("PRAGMA table_info(workspace_accounts)").fetchall()
+    names = ('console', 'hub_user', 'workspace_id', 'binding', 'state', 'receipt')
+    if (tuple(row['name'] for row in columns) != names
+            or any(not any(part in row['type'].upper() for part in ('CHAR', 'CLOB', 'TEXT'))
+                   or 'INT' in row['type'].upper() for row in columns)
+            or tuple(row['notnull'] for row in columns) != (1, 1, 1, 1, 1, 0)
+            or tuple(row['pk'] for row in columns) != (1, 2, 0, 0, 0, 0)):
+        raise ValueError('Reviewed workspace account ownership schema required')
+    for index in db.execute("PRAGMA index_list(workspace_accounts)").fetchall():
+        if not index['unique'] or index['partial']:
+            continue
+        indexed = db.execute('SELECT name FROM pragma_index_info(?) ORDER BY seqno',
+                             (index['name'],)).fetchall()
+        if tuple(row['name'] for row in indexed) == ('console', 'workspace_id'):
+            return
+    raise ValueError('Reviewed workspace account ownership schema required')
+
+
 class LocalCourseProvider:
     capabilities = frozenset({'create', 'update', 'delete'})
 
@@ -58,6 +78,14 @@ class LocalCourseProvider:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if self.db.execute(
+                "SELECT 1 FROM sqlite_schema WHERE name='workspace_accounts' COLLATE NOCASE"
+        ).fetchone():
+            try:
+                _validate_workspace_account_schema(self.db)
+            except ValueError:
+                self.db.close()
+                raise
         required = {'records', 'email_links', 'audit', 'console_owner',
                     'reviewed_account_aliases', 'workspace_accounts'}
         if not allow_schema_upgrade and (version != 7 or not required <= tables):

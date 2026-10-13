@@ -36,6 +36,11 @@ c.CourseServiceApp.allow_console_schema_upgrade = False
 ```
 
 The final application defaults to refusing database initialization and upgrades.
+An existing ownership table must have its six ordered text columns and expected
+nullability, owner primary key `(console, hub_user)` and nonpartial workspace
+uniqueness `(console, workspace_id)`. A complete-looking schema7 table without
+those exclusions is refused before writing, including when schema upgrade is
+explicitly authorized; the upgrade switch does not repair malformed ownership.
 After taking the reviewed online v6 backup, explicitly set
 `allow_console_schema_upgrade=True` for the controlled first boot (or use the
 provider's explicit upgrade interface on an authorized offline copy), verify

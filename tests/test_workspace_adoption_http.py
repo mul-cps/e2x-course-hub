@@ -20,6 +20,7 @@ class AdoptionHTTPTest(AsyncHTTPTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.provider = LocalCourseProvider(Path(self.tmp.name) / "db", "cps")
         self.admin, self.calls, self.failure = True, [], None
+        self.auth_kind = "user"
         outer = self
 
         class Hub:
@@ -40,7 +41,9 @@ class AdoptionHTTPTest(AsyncHTTPTestCase):
         class Handler(WorkspaceAccountAdoptionHandler):
             def get_current_user(self):
                 name = self.request.headers.get("X-Test-User")
-                return {"name": name} if name else None
+                if not name:
+                    return None
+                return {"name": name, "kind": outer.auth_kind}
 
         routes = [
             (pattern, Handler)
@@ -86,6 +89,17 @@ class AdoptionHTTPTest(AsyncHTTPTestCase):
         self.admin = False
         self.assertEqual(self.request({"reason": "review", "provenance": "ticket"}).code, 403)
         self.assertEqual(self.request({"review": {}}, action="execute", user=None).code, 403)
+        self.assertEqual(self.calls, [])
+
+    def test_service_and_missing_kind_cannot_impersonate_same_named_admin(self):
+        for kind in ("service", None):
+            self.auth_kind = kind
+            for body, action in [
+                ({"reason": "review", "provenance": "ticket"}, "plan"),
+                ({"review": {"binding": {"id": "w"}, "actor": "operator"}}, "execute"),
+            ]:
+                with self.subTest(kind=kind, action=action):
+                    self.assertEqual(self.request(body, action, user="operator").code, 403)
         self.assertEqual(self.calls, [])
 
     def test_route_and_body_injections_are_rejected(self):

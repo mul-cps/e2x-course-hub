@@ -436,6 +436,51 @@ class AdoptionTests(unittest.IsolatedAsyncioTestCase):
         await self.adapter.adopt_reviewed(packet, actor="operator")
         self.assertEqual(self.hub.created, [])
 
+    async def test_schema7_ownership_exclusion_contract_must_exist_before_open(self):
+        definitions = {
+            "unconstrained": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT",
+            "missing_workspace_unique": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT, "
+            "PRIMARY KEY(console, hub_user)",
+            "wrong_primary_key": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT, "
+            "PRIMARY KEY(console, workspace_id), UNIQUE(console, hub_user)",
+            "nullable_owner": "console TEXT NOT NULL, hub_user TEXT, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT, "
+            "PRIMARY KEY(console, hub_user), UNIQUE(console, workspace_id)",
+            "wrong_column_type": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding BLOB NOT NULL, state TEXT NOT NULL, receipt TEXT, "
+            "PRIMARY KEY(console, hub_user), UNIQUE(console, workspace_id)",
+            "missing_receipt": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, "
+            "PRIMARY KEY(console, hub_user), UNIQUE(console, workspace_id)",
+            "partial_unique": "console TEXT NOT NULL, hub_user TEXT NOT NULL, "
+            "workspace_id TEXT NOT NULL, binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT, "
+            "PRIMARY KEY(console, hub_user)",
+        }
+        for name, definition in definitions.items():
+            with self.subTest(name=name):
+                path = Path(self.tmp.name) / (name + ".sqlite")
+                self.provider.backup(path)
+                with sqlite3.connect(path) as db:
+                    db.execute("DROP TABLE workspace_accounts")
+                    table = (
+                        "WORKSPACE_ACCOUNTS" if name == "unconstrained" else "workspace_accounts"
+                    )
+                    db.execute("CREATE TABLE " + table + " (" + definition + ")")
+                    if name == "partial_unique":
+                        db.execute(
+                            "CREATE UNIQUE INDEX workspace_partial "
+                            'ON workspace_accounts(console,workspace_id) WHERE state="ready"'
+                        )
+                before = path.read_bytes()
+                for authorized in (False, True):
+                    with self.subTest(allow_schema_upgrade=authorized):
+                        with self.assertRaisesRegex(ValueError, "ownership schema"):
+                            LocalCourseProvider(path, "cps", allow_schema_upgrade=authorized)
+                        self.assertEqual(path.read_bytes(), before)
+
     async def test_completed_review_retry_does_not_restore_revoked_membership(self):
         packet = await self.plan()
         await self.adapter.adopt_reviewed(packet, actor="operator")

@@ -43,6 +43,9 @@ class WorkspaceAccountAdoptionHandler(RecordsHandler):
     """Only an authenticated owning administrator may review or adopt."""
     @web.authenticated
     async def post(self, identifier, action):
+        current = self.get_current_user()
+        if not isinstance(current, dict) or current.get('kind') != 'user':
+            raise web.HTTPError(403, reason='Authenticated owning user required')
         actor = await self.authorize()
         service = self.settings.get('workspace_service')
         accounts = getattr(service, 'accounts', None)
