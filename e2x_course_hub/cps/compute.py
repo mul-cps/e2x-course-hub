@@ -47,6 +47,9 @@ class ComputePolicyClient:
         payload = {key: value for key, value in grant.items() if key != 'source'}
         return await self._request('grants', 'PUT', payload)
 
+    async def workspace_registration(self, workspace):
+        return await self._request('workspaces/' + quote(workspace, safe=''))
+
     async def register_workspace(self, workspace, members, validation):
         required = ('namespace', 'pod')
         if any(not workspace.get(key) for key in required):

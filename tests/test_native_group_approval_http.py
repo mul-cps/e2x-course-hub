@@ -19,6 +19,9 @@ class NativeGroupApprovalHTTPTest(AsyncHTTPTestCase):
         self.admin = True
         self.calls = []
         self.failure = None
+        self.central_exists = True
+        self.prepare_failure = None
+        self.prepared = []
         outer = self
 
         class Hub:
@@ -37,15 +40,26 @@ class NativeGroupApprovalHTTPTest(AsyncHTTPTestCase):
                 return {'revision': 'sha256:' + 'a' * 64, 'ready': False,
                         'qualified_profiles': ['interactive-shared-5'], 'approvals': {}}
 
+            async def workspace_registration(self, workspace):
+                if outer.central_exists:
+                    return {'workspace': workspace, 'source': 'cps'}
+                raise HTTPClientError(404)
+
             async def mutate_native_group_approval(self, workspace, body, *, revoke=False):
                 if outer.failure:
                     raise outer.failure
                 outer.calls.append((workspace, body, revoke))
                 return {'revision': 'sha256:' + 'b' * 64, 'ready': False}
 
+        class Workspaces:
+            async def prepare_native_approval(self, identifier, *, actor):
+                if outer.prepare_failure:
+                    raise outer.prepare_failure
+                outer.prepared.append((identifier, actor))
+
         routes = [(pattern, Handler) for pattern, handler in default_handlers
                   if handler is NativeGroupApprovalHandler]
-        return web.Application(routes, compute_policy=Client(),
+        return web.Application(routes, compute_policy=Client(), workspace_service=Workspaces(),
             last_config_check=time.time(), course_provider=self.provider,
             api=SimpleNamespace(course_api=SimpleNamespace(hub_api=Hub())),
             login_url='/login', cookie_secret='test')
@@ -106,3 +120,27 @@ class NativeGroupApprovalHTTPTest(AsyncHTTPTestCase):
                 self.failure = HTTPClientError(status)
                 self.assertEqual(self.request({'profile': 'interactive-shared-5', 'expected_revision': 'x'}).code, status)
         self.assertEqual(self.calls, [])
+
+    def test_new_group_is_prepared_by_actual_admin_before_approval(self):
+        self.central_exists = False
+        body = {'profile': 'interactive-shared-5', 'expected_revision': 'sha256:' + 'a' * 64}
+        self.assertEqual(self.request(body).code, 200)
+        self.assertEqual(self.prepared, [('w', 'alice')])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_existing_group_and_revoke_do_not_prepare_or_revalidate_grants(self):
+        self.prepare_failure = PermissionError('Expired grants must not block structural approval')
+        body = {'profile': 'interactive-shared-5', 'expected_revision': 'sha256:' + 'a' * 64}
+        self.assertEqual(self.request(body).code, 200)
+        self.central_exists = False
+        self.assertEqual(self.request({'expected_revision': body['expected_revision']}, action='revoke').code, 200)
+        self.assertEqual(self.prepared, [])
+
+    def test_failed_preparation_never_mutates_approval_and_is_audited(self):
+        self.central_exists = False
+        self.prepare_failure = PermissionError('Unreviewed canonical members')
+        body = {'profile': 'interactive-shared-5', 'expected_revision': 'sha256:' + 'a' * 64}
+        self.assertEqual(self.request(body).code, 403)
+        self.assertEqual(self.calls, [])
+        count = self.provider.db.execute("SELECT COUNT(*) FROM audit WHERE kind='native-group-approvals'").fetchone()[0]
+        self.assertEqual(count, 1)

@@ -91,10 +91,26 @@ class NativeGroupApprovalHandler(RecordsHandler):
         provider = self.settings['course_provider']
         try:
             previous = await client.native_group_approvals()
+            if action == 'approve':
+                try:
+                    await client.workspace_registration(identifier)
+                except HTTPClientError as error:
+                    if error.code != 404:
+                        raise
+                    service = self.settings.get('workspace_service')
+                    if service is None:
+                        raise RuntimeError('Shared workspace preparation not configured')
+                    await service.prepare_native_approval(identifier, actor=actor)
             result = await client.mutate_native_group_approval(identifier, data, revoke=action == 'revoke')
         except HTTPClientError as error:
             provider.denial(actor, 'native-group-approvals', identifier, data, 'denied')
             raise web.HTTPError(error.code, reason='Shared compute policy rejected group approval') from None
+        except (ValueError, KeyError, PermissionError, TimeoutError, RuntimeError) as error:
+            provider.denial(actor, 'native-group-approvals', identifier, data, 'denied')
+            status = (403 if isinstance(error, PermissionError) else
+                      409 if isinstance(error, TimeoutError) else
+                      503 if isinstance(error, RuntimeError) else 400)
+            raise web.HTTPError(status, reason=str(error)) from None
         with provider.db:
             provider._audit(actor, 'native-group-approvals', identifier, json.dumps(previous), json.dumps(result))
         self.write(result or {})
