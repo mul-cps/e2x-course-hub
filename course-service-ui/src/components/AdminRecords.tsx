@@ -210,6 +210,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const [groupApproval, setGroupApproval] = useState<Row | null>(null);
   const [approvalProfile, setApprovalProfile] = useState("");
   const [approvalError, setApprovalError] = useState("");
+  const [grantWorkspace, setGrantWorkspace] = useState("");
+  const [grantDiscovery, setGrantDiscovery] = useState<{
+    workspace: string;
+    loading: boolean;
+    profiles: Row[];
+    failed: boolean;
+  }>({ workspace: "", loading: true, profiles: [], failed: false });
   const [profileDiscovery, setProfileDiscovery] = useState<{
     workspace: string;
     loading: boolean;
@@ -323,11 +330,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     const needed = [
       ...new Set([
         ...fields[kind].flatMap((f) =>
-          f.reference && !(kind === "workspaces" && f.reference === "profiles")
+          f.reference && !(["workspaces", "compute"].includes(kind) && f.reference === "profiles")
             ? [f.reference]
             : [],
         ),
         ...(kind === "workspaces" ? ["memberships"] : []),
+        ...(kind === "compute" ? ["workspaces"] : []),
       ]),
     ];
     Promise.all(
@@ -353,6 +361,29 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       active = false;
     };
   }, [kind]);
+  useEffect(() => {
+    if (kind !== "compute") return;
+    let active = true;
+    setGrantDiscovery({ workspace: grantWorkspace, loading: true, profiles: [], failed: false });
+    requests.get(`${config.apiUrl}/compute`, grantWorkspace ? { workspace: grantWorkspace } : undefined)
+      .then((result) => {
+        if (active) setGrantDiscovery({ workspace: grantWorkspace, loading: false, profiles: rowsFrom(result), failed: false });
+      })
+      .catch(() => {
+        if (active) setGrantDiscovery({ workspace: grantWorkspace, loading: false, profiles: [], failed: true });
+      });
+    return () => { active = false; };
+  }, [kind, grantWorkspace]);
+  const grantChoicesPending = grantDiscovery.loading || grantDiscovery.workspace !== grantWorkspace;
+  const grantProfiles = grantChoicesPending ? [] : grantDiscovery.profiles.filter((profile) => {
+    if (profile.enabled !== true) return false;
+    const gpu = profile.gpu as Row | undefined;
+    const scoped = profile.nativeGroupWorkspace !== undefined ||
+      (gpu?.qualification as Row | undefined)?.status === "qualified-group" ||
+      String(profile.id).startsWith("interactive-shared-");
+    return !scoped || (grantWorkspace !== "" && profile.nativeGroupWorkspace === grantWorkspace &&
+      profile.kind === "interactive" && ["interactive-shared-5", "interactive-shared-10"].includes(String(profile.id)));
+  });
   const workspaceProfileScope =
     kind === "workspaces" ? String(draft?.id ?? "") : "";
   useEffect(() => {
@@ -491,6 +522,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     }
   }
   function open(record?: Row) {
+    setGrantWorkspace("");
     setEditing(Boolean(record));
     setDraft(
       record
@@ -530,6 +562,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   async function save() {
     if (!draft) return;
     try {
+      if (kind === "compute" && (grantChoicesPending || grantDiscovery.failed || !Array.isArray(draft.profiles) ||
+          (draft.profiles as string[]).some((name) => !grantProfiles.some((profile) => profile.id === name))))
+        throw new Error("Select currently available profiles.");
       const payload: Row = {};
       for (const f of fields[kind]) {
         const v = draft[f.key];
@@ -1046,6 +1081,24 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 permissions and recorded in the audit log.
               </p>
               <div className="form-grid">
+                {kind === "compute" && (
+                  <label className="full-width">
+                    Grant workspace context
+                    <select aria-label="Grant workspace context" value={grantWorkspace} disabled={busy}
+                      onChange={(event) => {
+                        setGrantWorkspace(event.target.value);
+                        setDraft({ ...draft, profiles: [] });
+                      }}>
+                      <option value="">Personal / CPU profiles</option>
+                      {(refs.workspaces ?? []).map((workspace) => (
+                        <option key={String(workspace.id)} value={String(workspace.id)}>{display(workspace.id)}</option>
+                      ))}
+                    </select>
+                    <span className="field-help">Select an approved workspace to include its shared GPU profile. Start still checks each member’s current access.</span>
+                    {grantChoicesPending && <span role="status">Loading profile choices…</span>}
+                    {!grantChoicesPending && grantDiscovery.failed && <span role="alert">Workspace profile choices are unavailable.</span>}
+                  </label>
+                )}
                 {fields[kind]
                   .filter(
                     (f) =>
@@ -1057,6 +1110,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     let options =
                       f.reference === "profiles" && kind === "workspaces"
                         ? workspaceProfiles
+                        : f.reference === "profiles" && kind === "compute"
+                          ? grantProfiles
                         : (refs[f.reference ?? ""] ?? []);
                     if (
                       f.reference === "terms" ||
@@ -1257,7 +1312,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 >
                   Cancel
                 </button>
-                <button className="primary-button" disabled={busy}>
+                <button className="primary-button" disabled={busy || (kind === "compute" && (grantChoicesPending || grantDiscovery.failed))}>
                   {busy
                     ? "Saving…"
                     : kind === "assignments"
