@@ -8,3 +8,7 @@ __pycache__
 dist
 *.sqlite*
 .env
+# The UI release recipe installs the locally verified full application wheel.
+!dist/
+dist/*
+!dist/*.whl
