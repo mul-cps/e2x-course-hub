@@ -169,10 +169,10 @@ def _sqlite(path, source, course_id):
         version = db.execute('PRAGMA user_version').fetchone()[0]
         schema = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name,tbl_name').fetchall()
         tables = sorted(row[1] for row in schema if row[0] == 'table')
-        if version != 6 or not {'records', 'console_owner', 'email_links', 'reviewed_account_aliases', 'audit'} <= set(tables):
-            raise ValueError('Matching console schema version 6 required')
+        if version != 7 or not {'records', 'console_owner', 'email_links', 'reviewed_account_aliases', 'workspace_accounts', 'audit'} <= set(tables):
+            raise ValueError('Matching console schema version 7 required')
         owners = {r[0] for r in db.execute('SELECT owner FROM console_owner')}
-        for table in ('records', 'email_links', 'reviewed_account_aliases', 'audit'):
+        for table in ('records', 'email_links', 'reviewed_account_aliases', 'workspace_accounts', 'audit'):
             owners.update(r[0] for r in db.execute('SELECT DISTINCT console FROM ' + table))
         if owners != {source}:
             raise ValueError('Foreign or unowned console database')
@@ -320,7 +320,7 @@ def capture(inputs, output, hub_validator):
             manifest = _json(manifest_raw)
             stamps.append(_stamp(manifest['created_at']))
             raw = _read(console / 'console.sqlite')
-            if (manifest['owner'] != source or manifest['user_version'] != 6 or
+            if (manifest['owner'] != source or manifest['user_version'] != 7 or
                     _sha(raw) != manifest['sha256']['console.sqlite'] or
                     not IMAGE.fullmatch(manifest['application_image']) or
                     not re.fullmatch(r'sha256:[a-f0-9]{64}', manifest['policy_hash'])):

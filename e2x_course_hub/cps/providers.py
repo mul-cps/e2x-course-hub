@@ -47,14 +47,14 @@ class LocalCourseProvider:
         self._importing = False
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
-        if self.db.execute('PRAGMA user_version').fetchone()[0]>6:
+        if self.db.execute('PRAGMA user_version').fetchone()[0]>7:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         owners = set()
         if 'records' in tables:
             owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM records'))
-        for table in ('email_links','reviewed_account_aliases','audit'):
+        for table in ('email_links','reviewed_account_aliases','workspace_accounts','audit'):
             if table in tables:
                 owners.update(row[0] for row in self.db.execute('SELECT DISTINCT console FROM '+table))
         if 'console_owner' in tables:
@@ -81,7 +81,11 @@ class LocalCourseProvider:
                     email TEXT, review_actor TEXT NOT NULL, review_reason TEXT NOT NULL,
                     reviewed_at TEXT NOT NULL, PRIMARY KEY(console,username),
                     UNIQUE(console,canonical_person_id));
-                PRAGMA user_version=6;
+                CREATE TABLE IF NOT EXISTS workspace_accounts (
+                    console TEXT NOT NULL, hub_user TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                    binding TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT,
+                    PRIMARY KEY(console,hub_user), UNIQUE(console,workspace_id));
+                PRAGMA user_version=7;
             ''')
             owners = {row[0] for row in self.db.execute('SELECT DISTINCT console FROM records')}
             owners.update(row[0] for row in self.db.execute('SELECT owner FROM console_owner'))

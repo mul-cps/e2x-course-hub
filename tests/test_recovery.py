@@ -156,7 +156,7 @@ class RecoveryTests(unittest.TestCase):
             (directory/'console.sqlite').chmod(0o600)
             raw=(directory/'console.sqlite').read_bytes()
             write(directory/'manifest.json',{'owner':source,'application_image':'registry/admin@sha256:'+'a'*64,
-                'policy_hash':'sha256:'+'b'*64,'user_version':6,'created_at':'2026-10-11T12:00:06Z','sha256':{'console.sqlite':sha(raw)}})
+                'policy_hash':'sha256:'+'b'*64,'user_version':7,'created_at':'2026-10-11T12:00:06Z','sha256':{'console.sqlite':sha(raw)}})
             fingerprints={'schema':'4621fec11365:'+'1'*64,'tables':{'users':'c'*64,'alembic_version':'0'*64},'roles':'d'*64,'role_members':'e'*64,'acls':'f'*64}
             write(directory/'postgres.json',{'namespace':namespace,'captured_at':'2026-10-11T12:00:07Z','fingerprints':fingerprints})
             storage={'pvc_uid':source+'-original-pvc','pv_uid':source+'-original-pv','nfs_server':'nas',

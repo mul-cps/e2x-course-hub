@@ -178,7 +178,7 @@ class ReviewedAliasTests(unittest.IsolatedAsyncioTestCase):
         restored = LocalCourseProvider(backup, 'cps')
         try:
             self.assertEqual(await WorkspaceService(restored, None, None).members(self.workspace), [PERSON])
-            self.assertEqual(restored.db.execute('PRAGMA user_version').fetchone()[0], 6)
+            self.assertEqual(restored.db.execute('PRAGMA user_version').fetchone()[0], 7)
         finally:
             restored.db.close()
         with self.assertRaises(ValueError):

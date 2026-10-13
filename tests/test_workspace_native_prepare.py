@@ -60,7 +60,7 @@ class NativePreparationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prepare_registers_provisions_revalidates_and_keeps_stopped_audited(self):
         result=await self.service.prepare_native_approval('w',actor='admin')
-        self.assertEqual(self.calls,['stopped','validate-cpu','register','cleanup','provision','validate-current'])
+        self.assertEqual(self.calls,['validate-cpu','stopped','register','cleanup','provision','validate-current'])
         self.assertEqual(self.registered['namespace'],'jupyterhub')
         self.assertEqual(self.registered['pod'],'jupyter-neutral-new--rtc')
         self.assertEqual(result['state'],'stopped');self.assertEqual(result['profile'],'interactive-cpu')

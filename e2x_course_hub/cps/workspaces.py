@@ -133,7 +133,7 @@ class UnconfiguredFilesystemAdapter:
 
 
 class WorkspaceService:
-    def __init__(self, provider, compute, hub, *, filesystem=None, native_cleanup_timeout=60):
+    def __init__(self, provider, compute, hub, *, filesystem=None, accounts=None, native_cleanup_timeout=60):
         if (type(native_cleanup_timeout) not in (int, float)
                 or not math.isfinite(native_cleanup_timeout) or not 0 < native_cleanup_timeout <= 120):
             raise ValueError('Native cleanup wait must be finite and at most 120 seconds')
@@ -141,12 +141,28 @@ class WorkspaceService:
         self.locks = {}
         self.course_locks = {}
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
+        self.accounts = accounts
         self.native_cleanup_timeout = native_cleanup_timeout
 
     async def get(self, identifier):
         for record in await self.provider.list('workspaces'):
             if record['id'] == identifier: return record
         raise KeyError(identifier)
+
+    async def _ensure_account(self, workspace, *, actor):
+        if self.accounts is None:
+            return
+        from .validation import validate
+        await validate(self.provider, 'workspaces', workspace)
+        course = next((c for c in await self.provider.courses() if c['id'] == workspace['course_id']), None)
+        group = next((g for g in await self.provider.groups(workspace['course_id'])
+                      if g['id'] == workspace['group_id']), None)
+        term = next((t for t in await self.provider.terms(workspace['course_id'])
+                     if t['id'] == workspace.get('term_id')), None)
+        if any(not record or record.get('source', 'local') != 'local'
+               or record.get('external_id') is not None for record in (workspace, course, group, term)):
+            raise PermissionError('Owned local workspace, course, term and group required for fresh Hub account provisioning')
+        await self.accounts.ensure(workspace, actor=actor)
 
     async def members(self, workspace):
         from .expiry import active
@@ -245,12 +261,14 @@ class WorkspaceService:
                     raise ValueError('Workspace, course binding or canonical membership changed during preparation')
 
             await unchanged(original)
+            validation = await self.compute.validate_workspace(identifier,members,prepared['profile'],prepared['course_ceiling'])
+            await self._ensure_account(prepared,actor=actor)
+            await unchanged(original)
             await self.hub.assert_stopped(prepared)
             reservation = await self.compute.reservation_state(identifier)
             if (not isinstance(reservation,dict) or reservation.get('active') is not False
                     or reservation.get('attempt') is not None):
                 raise ValueError('Confirmed inactive reservation required before approval preparation')
-            validation = await self.compute.validate_workspace(identifier,members,prepared['profile'],prepared['course_ceiling'])
             await unchanged(original)
             # Block normal Starts and membership edits while asynchronous storage is prepared.
             guarded = await self.provider.put('workspaces',{**prepared,'state':'preparing'},actor=actor)
@@ -323,6 +341,7 @@ class WorkspaceService:
     async def start(self, identifier, *, actor):
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
+            original = workspace
             if workspace.get('state','stopped') != 'stopped':
                 raise ValueError('Workspace lifecycle is unresolved; observed Stop/reconciliation required')
             if workspace.get('archive_pending') or workspace.get('archived'):
@@ -348,9 +367,15 @@ class WorkspaceService:
                 raise ValueError('Exact operator-owned workspace binding required')
             workspace={**workspace,'course_ceiling':course['resource_ceiling'],
                        'namespace':bindings[0].get('namespace'), 'pod':bindings[0].get('pod')}
-            await self.hub.assert_stopped(workspace)
             members = await self.members(workspace)
             validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
+            await self._ensure_account(workspace,actor=actor)
+            if (await self.get(identifier) != original
+                    or next((c for c in await self.provider.courses() if c['id']==course['id']),None) != course
+                    or next((g for g in await self.provider.groups(course['id']) if g['id']==group.get('id')),None) != group
+                    or await self.members(workspace) != members):
+                raise ValueError('Workspace, owned course binding or membership changed during account preparation')
+            await self.hub.assert_stopped(workspace)
             # Persist the guard before asynchronous provisioning/registration/Hub calls.
             await self.provider.put('workspaces',{**workspace,'state':'starting'},actor=actor)
             try:

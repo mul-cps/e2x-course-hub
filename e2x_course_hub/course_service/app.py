@@ -19,6 +19,7 @@ from ..cps.platform_handlers import default_handlers as platform_handlers
 from ..cps.proxy import default_handlers as proxy_handlers
 from ..cps.compute import ComputePolicyClient
 from ..cps.workspaces import HubWorkspaceAdapter, WorkspaceService
+from ..cps.accounts import WorkspaceAccountAdapter
 from .handlers import apihandlers, handlers
 
 
@@ -104,6 +105,9 @@ class CourseServiceApp(Application):
     database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
     course_providers = Dict(default_value={'local': {'enabled': True}, 'moodle': {'enabled': False}}, help='Course provider configuration').tag(config=True)
 
+    neutral_workspace_group = Unicode('', help='Operator-provisioned fixed Hub group granting only the minimum workspace kernel role; empty fails closed').tag(config=True)
+    neutral_workspace_role = Unicode('cps-workspace-kernel', help='Operator-configured minimum workspace kernel role; never supplied by browser requests').tag(config=True)
+
     filesystem_adapter_class = Unicode("", help="Operator-qualified archive adapter dotted class path; empty fails closed").tag(config=True)
 
     def init_tornado_settings(self):
@@ -128,7 +132,10 @@ class CourseServiceApp(Application):
             if self.filesystem_adapter_class:
                 from traitlets.utils.importstring import import_item
                 filesystem = import_item(self.filesystem_adapter_class)()
-            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api), filesystem=filesystem)
+            accounts = WorkspaceAccountAdapter(provider, hub_api, group=self.neutral_workspace_group,
+                                               role=self.neutral_workspace_role)
+            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api),
+                                                 filesystem=filesystem, accounts=accounts)
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))
         settings = {
             "api": api,
