@@ -125,6 +125,12 @@ class PermanentSourceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.adapter.ensure(self.workspace, actor='instructor')
 
+    async def test_date_only_value_is_not_an_actual_hub_creation_timestamp(self):
+        value = receipt()
+        value['identity']['created'] = '2026-10-13Z'
+        with self.assertRaises(PermissionError):
+            self.adapter._creation_receipt(value, self.adapter._binding(self.workspace))
+
     async def test_successful_v7_and_source_creation_receipts_keep_legacy_owner(self):
         workspace = dict(self.workspace, hub_user='retained-legacy-owner')
         binding = self.adapter._binding(workspace)

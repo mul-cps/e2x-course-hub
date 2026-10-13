@@ -308,7 +308,9 @@ class WorkspaceAccountAdapter:
                 or not identity["created"].endswith("Z")):
             raise PermissionError("Exact typed permanent Hub creation receipt required")
         try:
-            datetime.fromisoformat(identity["created"][:-1] + "+00:00")
+            timestamp = datetime.fromisoformat(identity["created"][:-1] + "+00:00")
+            if "T" not in identity["created"] or timestamp.tzinfo is None:
+                raise ValueError("Hub creation timestamp must include UTC time")
         except ValueError as error:
             raise PermissionError("Actual Hub creation timestamp required") from error
         return identity
