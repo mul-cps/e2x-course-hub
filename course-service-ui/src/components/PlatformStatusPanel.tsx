@@ -148,7 +148,7 @@ function validAvailability(value: unknown): value is Availability {
     typeof access.revision === "string" &&
     /^sha256:[a-f0-9]{64}$/.test(access.revision) &&
     typeof access.policyHash === "string" &&
-    /^[a-f0-9]{64}$/.test(access.policyHash) &&
+    /^sha256:[a-f0-9]{64}$/.test(access.policyHash) &&
     (access.approvedWorkspaceCount === 0
       ? access.approvedProfiles.length === 0
       : access.approvedProfiles.length > 0 &&

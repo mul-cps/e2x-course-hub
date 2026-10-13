@@ -22,7 +22,7 @@ from e2x_course_hub.schema.user import User
 
 NOW = datetime(2026, 10, 13, 21, 0, tzinfo=timezone.utc)
 REVISION = "sha256:" + "a" * 64
-POLICY = "b" * 64
+POLICY = "sha256:" + "b" * 64
 
 
 def registry():
@@ -110,6 +110,7 @@ class AvailabilityTest(IsolatedAsyncioTestCase):
         cases = []
         for key, value in [
             ("revision", "a" * 64),
+            ("policy_hash", POLICY[7:]),
             ("policy_hash", "sha256:" + POLICY),
             ("ready", 1),
             ("qualified_profiles", ["interactive-cpu"]),

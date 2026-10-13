@@ -16,7 +16,7 @@ const record = {
 const availability = {
   state: "ready",
   revision: "sha256:" + "a".repeat(64),
-  policyHash: "b".repeat(64),
+  policyHash: "sha256:" + "b".repeat(64),
   approvedProfiles: ["interactive-shared-5"],
   approvedWorkspaceCount: 2,
   checkedAt: new Date().toISOString(),
@@ -174,6 +174,7 @@ test("stale or malformed live observations do not retain a ready GPU label", asy
   for (const changes of [
     { checkedAt: new Date(Date.now() - 31000).toISOString() },
     { revision: "a".repeat(64) },
+    { policyHash: "b".repeat(64) },
     { approvedWorkspaceCount: true },
     { approvedProfiles: ["interactive-exclusive-1"] },
     { approvedProfiles: ["interactive-shared-5", "interactive-shared-5"] },
