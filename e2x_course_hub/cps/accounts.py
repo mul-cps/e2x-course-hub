@@ -1,14 +1,41 @@
 """Fresh neutral Hub accounts, with permanent Source ownership receipts.
 
-A POST with an unknown outcome is deliberately not retried by adopting the user.
-No failure path removes a Hub identity or its files.
+New accounts use the permanent Hub receipt endpoint. Exact retries never infer
+ownership from a user GET or restore revoked permissions. Legacy receipts and
+identifiers retain their provenance. No failure path removes identities/files.
 """
 
+import hashlib
 import json
 import re
 import sqlite3
+from datetime import datetime
 
 from ..api.errors import GroupNotFoundError, UserNotFoundError
+
+
+def _creation_descriptor(source, binding):
+    """Wire contract qualified against cps_compute_hub.neutral_accounts."""
+    body = {key: binding[field] for key, field in (
+        ("workspace", "id"), ("course", "course_id"), ("term", "term_id"),
+        ("group", "group_id"), ("server", "hub_server"),
+        ("namespace", "namespace"), ("pod", "pod"))}
+    if source not in {"cps", "cit"}:
+        raise PermissionError("Configured owning Source required for Hub account creation")
+    for key, value in body.items():
+        pattern = r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}"
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if key in {"namespace", "server"}:
+            pattern = label
+        elif key == "pod":
+            pattern = label + r"(?:\." + label + r")*"
+        if (not isinstance(value, str) or re.fullmatch(pattern, value) is None
+                or (key == "pod" and len(value) > 253)):
+            raise ValueError("Invalid permanent Hub workspace descriptor")
+    serialized = json.dumps(dict(source=source, **body), sort_keys=True,
+                            separators=(",", ":"), ensure_ascii=True)
+    owner = source + "-ws-" + hashlib.sha256((source + "\0" + body["workspace"]).encode()).hexdigest()[:32]
+    return body, owner, hashlib.sha256(serialized.encode()).hexdigest()
 
 
 class WorkspaceAccountAdapter:
@@ -244,6 +271,9 @@ class WorkspaceAccountAdapter:
             return receipt
         if not isinstance(receipt, dict) or receipt.get("version") != 1:
             raise PermissionError("Validated persistent ownership provenance required")
+        if receipt.get("kind") == "hub_neutral_creation":
+            identity = self._creation_receipt(receipt, json.loads(row["binding"]))
+            return {key: identity[key] for key in ("name", "created")}
         if receipt.get("kind") == "source_creation" and set(receipt) == {
             "version",
             "kind",
@@ -260,56 +290,78 @@ class WorkspaceAccountAdapter:
             return validate_receipt(receipt, json.loads(row["binding"]), self.provider.console)
         raise PermissionError("Validated persistent ownership provenance required")
 
-    async def _ensure(self, binding, row):
-        await self._preflight(binding)
+    def _creation_receipt(self, receipt, binding):
+        _, owner, digest = _creation_descriptor(self.provider.console, binding)
+        identity = receipt.get("identity") if isinstance(receipt, dict) else None
+        expected = dict(version=1, kind="hub_neutral_creation", source=self.provider.console,
+                        workspace=binding["id"], owner=owner, descriptor_hash=digest,
+                        group="cps-workspace-kernel-accounts", role="cps-workspace-kernel")
+        if (binding["hub_user"] != owner or self.group != expected["group"]
+                or self.role != expected["role"]
+                or not isinstance(receipt, dict) or set(receipt) != set(expected) | {"identity"}
+                or type(receipt.get("version")) is not int
+                or any(receipt.get(key) != value for key, value in expected.items())
+                or not isinstance(identity, dict) or set(identity) != {"id", "name", "created"}
+                or type(identity.get("id")) is not int or identity["id"] <= 0
+                or identity.get("name") != owner
+                or not isinstance(identity.get("created"), str)
+                or not identity["created"].endswith("Z")):
+            raise PermissionError("Exact typed permanent Hub creation receipt required")
+        try:
+            datetime.fromisoformat(identity["created"][:-1] + "+00:00")
+        except ValueError as error:
+            raise PermissionError("Actual Hub creation timestamp required") from error
+        return identity
+
+    async def _ensure_hub_creation(self, binding, row):
+        body, owner, _ = _creation_descriptor(self.provider.console, binding)
+        if (binding["hub_user"] != owner or self.group != "cps-workspace-kernel-accounts"
+                or self.role != "cps-workspace-kernel"):
+            raise PermissionError("Computed neutral owner and fixed Hub kernel group required")
         if row is None:
             try:
-                await self.hub.get_user(binding["hub_user"])
-            except UserNotFoundError:
-                pass
-            else:
-                raise PermissionError(
-                    "Hub account already exists without a successful Source "
-                    "creation receipt; choose a fresh owner"
-                )
-            try:
                 with self.provider.db:
-                    self.provider.db.execute(
-                        "INSERT INTO workspace_accounts VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            self.provider.console,
-                            binding["hub_user"],
-                            binding["id"],
-                            json.dumps(binding, sort_keys=True),
-                            "intent",
-                            None,
-                        ),
-                    )
+                    self.provider.db.execute("INSERT INTO workspace_accounts VALUES (?, ?, ?, ?, ?, ?)",
+                        (self.provider.console, owner, binding["id"],
+                         json.dumps(binding, sort_keys=True), "hub_intent", None))
             except sqlite3.IntegrityError as error:
-                raise PermissionError(
-                    "Concurrent Source account ownership claim; retry only a "
-                    "completed creation receipt"
-                ) from error
-            created = await self.hub.create_user(binding["hub_user"])
-            receipt = {
-                "version": 1,
-                "kind": "source_creation",
-                "identity": self._model(created, binding),
-            }
-            # Persist evidence of a successful POST before any role grant. A
-            # crash before this commit leaves only intent and requires review.
-            with self.provider.db:
-                self.provider.db.execute(
-                    "UPDATE workspace_accounts SET state=?, receipt=? WHERE "
-                    "console=? AND hub_user=?",
-                    (
-                        "created",
-                        json.dumps(receipt, sort_keys=True),
-                        self.provider.console,
-                        binding["hub_user"],
-                    ),
-                )
+                raise PermissionError("Concurrent permanent Source account ownership claim") from error
             row = self._row(binding)
+        if row["state"] not in ("hub_intent", "created", "ready"):
+            raise PermissionError("Permanent Hub creation outcome requires reconciliation")
+        previous = json.loads(row["receipt"]) if row["receipt"] else None
+        if previous is not None:
+            self._creation_receipt(previous, binding)
+        # This POST is the authority for identity ID, custody and revocation,
+        # including lost responses and Source receipt-persistence failures.
+        receipt = await self.hub.create_workspace_account(body)
+        identity = self._creation_receipt(receipt, binding)
+        if previous is not None and receipt != previous:
+            raise PermissionError("Permanent Hub creation receipt cannot be replaced")
+        with self.provider.db:
+            self.provider.db.execute("UPDATE workspace_accounts SET state=?, receipt=? WHERE "
+                "console=? AND hub_user=? AND binding=? AND state=? AND receipt IS ?",
+                ("created", json.dumps(receipt, sort_keys=True), self.provider.console, owner,
+                 row["binding"], row["state"], row["receipt"]))
+        current = self._row(binding)
+        if json.loads(current["receipt"] or "null") != receipt:
+            raise PermissionError("Concurrent Source creation receipt differs")
+        user = await self.hub.get_user(owner)
+        self._model(user, binding, receipt={key: identity[key] for key in ("name", "created")})
+        group = await self.hub.get_group(self.group)
+        if (self.group not in user["groups"] or group.get("name") != self.group
+                or group.get("roles") != [self.role] or owner not in group.get("users", [])):
+            raise PermissionError("Permanent Hub kernel membership was revoked or is unconfirmed")
+        with self.provider.db:
+            self.provider.db.execute("UPDATE workspace_accounts SET state=? WHERE console=? AND hub_user=?",
+                                     ("ready", self.provider.console, owner))
+
+    async def _ensure(self, binding, row):
+        await self._preflight(binding)
+        receipt = json.loads(row["receipt"]) if row and row["receipt"] else None
+        if (row is None or row["state"] == "hub_intent"
+                or isinstance(receipt, dict) and receipt.get("kind") == "hub_neutral_creation"):
+            return await self._ensure_hub_creation(binding, row)
         if row["state"] not in ("created", "ready") or not row["receipt"]:
             raise PermissionError(
                 "Fresh account creation outcome is ambiguous; preserve the "

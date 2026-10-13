@@ -4,15 +4,25 @@ import unittest
 
 from e2x_course_hub.cps.accounts import WorkspaceAccountAdapter
 from e2x_course_hub.cps.providers import LocalCourseProvider
-from test_workspace_accounts import HubFixture
+from test_workspace_accounts import GROUP, OWNER, HubFixture
 import test_workspace_native_prepare as preparation
 
 
 class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await preparation.NativePreparationTests.asyncSetUp(self)
-        self.api = HubFixture()
-        self.service.accounts = WorkspaceAccountAdapter(self.provider, self.api, group='neutral-kernels')
+        # Only this creation lifecycle fixture uses the new computed owner.
+        for kind in ('courses', 'workspaces'):
+            record = (await self.provider.list(kind))[0]
+            if kind == 'courses':
+                record['workspace_bindings'][0]['hub_user'] = OWNER
+            else:
+                record['hub_user'] = OWNER
+            self.provider.db.execute('UPDATE records SET payload=? WHERE console=? AND kind=? AND id=?',
+                (json.dumps(record), 'cps', kind, record['id']))
+        self.provider.db.commit()
+        self.api = HubFixture(group=GROUP)
+        self.service.accounts = WorkspaceAccountAdapter(self.provider, self.api, group=GROUP)
 
     async def asyncTearDown(self):
         await preparation.NativePreparationTests.asyncTearDown(self)
@@ -20,15 +30,15 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_preparation_creates_fresh_neutral_owner_before_registration_and_storage(self):
         original = self.compute.register_workspace
         async def register(workspace, members, validation):
-            self.assertEqual(self.api.users['neutral-new']['groups'], ['neutral-kernels'])
+            self.assertEqual(self.api.users[OWNER]['groups'], [GROUP])
             return await original(workspace, members, validation)
         self.compute.register_workspace = register
         result = await self.service.prepare_native_approval('w', actor='instructor')
         self.assertEqual(result['state'], 'stopped')
-        self.assertEqual(self.api.created, ['neutral-new'])
+        self.assertEqual(self.api.created, [OWNER])
         self.assertIn('provision', self.calls)
         await self.service.prepare_native_approval('w', actor='instructor')
-        self.assertEqual(self.api.created, ['neutral-new'])
+        self.assertEqual(self.api.created, [OWNER])
 
     async def test_external_or_missing_term_or_nonlocal_group_has_no_account_side_effect(self):
         original_course = (await self.provider.courses())[0]
@@ -63,17 +73,17 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('register', self.calls)
 
     async def test_source_binding_change_during_account_creation_preserves_account_but_blocks_storage(self):
-        original = self.api.create_user
-        async def changed(name):
-            created = await original(name)
+        original = self.api.create_workspace_account
+        async def changed(body):
+            created = await original(body)
             course = (await self.provider.courses())[0]
             course['workspace_bindings'][0]['pod'] = 'changed-pod'
             await self.provider.put('courses', course, actor='admin')
             return created
-        self.api.create_user = changed
+        self.api.create_workspace_account = changed
         with self.assertRaises(ValueError):
             await self.service.prepare_native_approval('w', actor='instructor')
-        self.assertIn('neutral-new', self.api.users)
+        self.assertIn(OWNER, self.api.users)
         self.assertNotIn('register', self.calls)
         self.assertNotIn('provision', self.calls)
         self.assertEqual((await self.service.get('w'))['state'], 'stopped')
@@ -83,7 +93,7 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
             pass
         self.hub.sync_group = self.hub.start = self.hub.replace_shares = allow
         await self.service.start('w', actor='instructor')
-        self.assertEqual(self.api.created, ['neutral-new'])
+        self.assertEqual(self.api.created, [OWNER])
         self.assertEqual((await self.service.get('w'))['state'], 'running')
         self.assertIn('register', self.calls)
         self.assertIn('provision', self.calls)
@@ -100,7 +110,7 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_start_denied_with_account_preserved(self):
         with self.assertRaises(ValueError):
             await self.service.start('w', actor='instructor')
-        self.assertIn('neutral-new', self.api.users)
+        self.assertIn(OWNER, self.api.users)
         self.assertEqual((await self.service.get('w'))['state'], 'stopped')
         self.assertEqual((await self.provider.list('assignments'))[0]['state'], 'closed')
         self.assertNotIn('register', self.calls)
@@ -108,12 +118,12 @@ class AccountLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_assignment_closure_during_account_creation_blocks_start(self):
         await self._start_assignment_fixture()
-        original = self.api.create_user
-        async def close_assignment(name):
-            result = await original(name)
+        original = self.api.create_workspace_account
+        async def close_assignment(body):
+            result = await original(body)
             await self.provider.put('assignments', {'id': 'a', 'state': 'closed'}, actor='admin')
             return result
-        self.api.create_user = close_assignment
+        self.api.create_workspace_account = close_assignment
         await self._assert_start_denied_with_account_preserved()
 
     async def test_assignment_closure_during_final_hub_stop_check_blocks_start(self):

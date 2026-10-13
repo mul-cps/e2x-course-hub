@@ -1,7 +1,10 @@
 # Reviewed legacy neutral account adoption
 
-Fresh `ensure()` continues to refuse an existing Hub user without a successful
-Source POST receipt. A v6 database upgrade adds an empty `workspace_accounts`
+Fresh `ensure()` uses the permanent packaged Hub endpoint described in
+[neutral-workspace-account-provisioning.md](neutral-workspace-account-provisioning.md).
+It refuses an existing Hub user without an authoritative permanent Hub receipt.
+Existing successful Source POST receipts retain their legacy provenance and
+identifiers. A v6 database upgrade adds an empty `workspace_accounts`
 table. It does not infer ownership from usernames, marker roles or old workspace
 records. Do not insert synthetic creation receipts into that table.
 
@@ -54,7 +57,9 @@ and group API models expose role names, so this scope definition is an operator
 Hub configuration gate. Keep Authenticator/OAuthenticator group and role
 management disabled and preserve inherited human/admin refresh behavior.
 Source must have narrowly scoped permission to inspect the reviewed users and
-fixed group, create approved fresh users, and mutate that group's users.
+fixed group, and mutate that group's users for explicit reviewed adoption.
+New account creation uses only `custom:cps:provision:workspace-account`; it does
+not require `admin:users` or an ordinary users POST.
 Gateway `neutralWorkspaceGroup` must be `cps-workspace-kernel-accounts`, and the
 interactive neutral login guard must recognize current group proof. Do not put
 member arrays back into Hub `load_groups`, and do not enable extra native
@@ -142,15 +147,18 @@ accessing that same DB; independent copies are not a distributed lock.
 compare-and-swap reserve the permanent binding and provenance before any group
 mutation. Audited durable stages are `adoption_reserved -> adoption_granting ->
 ready`. The receipt kind is `reviewed_legacy_adoption`, with the review and actual
-identity; successful fresh POST receipts have kind `source_creation`.
+identity. Previously successful ordinary Source POST receipts retain kind
+`source_creation` (or their original v7 `{name, created}` shape). New permanent
+Hub endpoint receipts have kind `hub_neutral_creation` and retain the full receipt.
 
 Do not delete an owner, recreate it, release an active reservation, change a
 Pod/PVC name or replace retained files to clear a failure. A reserved/granting
 stage survives receipt failure, group failure, an ambiguous grant response and
 restart. Keep the exact packet and retry after reconciling the cause. Readback
 avoids a duplicate grant after an ambiguous success. `ensure()` accepts adoption
-only after its validated receipt reaches `ready`. An unknown fresh POST intent
-remains fenced and cannot be converted to reviewed legacy provenance.
+only after its validated receipt reaches `ready`. An unknown legacy ordinary
+POST `intent` remains fenced and cannot be converted to reviewed legacy provenance.
+New `hub_intent` rows retry only the exact permanent Hub endpoint and descriptor.
 
 A completed unchanged review is idempotent. A completed review retry refuses to
 restore removed group membership. Current group proof remains authoritative;

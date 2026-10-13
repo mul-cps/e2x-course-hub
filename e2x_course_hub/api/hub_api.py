@@ -51,6 +51,7 @@ class HubAPI(HubOAuth):
         )
         provider = getattr(self, 'audit_provider', None)
         mutation = method in ('POST','PUT','PATCH','DELETE')
+        permanent_creation = url.rstrip('/').endswith('/cps/workspace-accounts')
         snapshot_url = url
         if '/groups/' in url and url.endswith('/users'): snapshot_url = url.rsplit('/users',1)[0]
         if '/users/' in url and '/servers/' in url: snapshot_url = url.split('/servers/',1)[0]
@@ -60,7 +61,7 @@ class HubAPI(HubOAuth):
                 return json.loads(response.body) if response.body else None
             except HTTPClientError as error:
                 return None if error.code == 404 else {'unavailable':error.code}
-        previous = await snapshot() if provider and mutation else None
+        previous = await snapshot() if provider and mutation and not permanent_creation else None
         outcome = 'failure'
         result = None
         try:
@@ -76,7 +77,7 @@ class HubAPI(HubOAuth):
                 from ..cps.audit import actor_context
                 from datetime import datetime, timezone
                 from urllib.parse import urlsplit
-                current = await snapshot()
+                current = (json.loads(result.body) if result and result.body else None) if permanent_creation else await snapshot()
                 try: requested = json.loads(body or '{}')
                 except ValueError: requested = {'invalid_json':True}
                 with provider.db:
@@ -181,6 +182,20 @@ class HubAPI(HubOAuth):
             return json.loads(resp.body)
         except HTTPClientError as e:
             self._handle_not_found(e, "user", username)
+
+    async def create_workspace_account(self, descriptor: dict):
+        """Provision with this Source service token and the narrow custom scope.
+
+        Hub derives the Source from its trusted Service mapping. The permanent
+        endpoint is the only retry authority; no user/group mutation is used.
+        """
+        fields = {'workspace', 'course', 'term', 'group', 'server', 'namespace', 'pod'}
+        if (not isinstance(descriptor, dict) or set(descriptor) != fields
+                or any(not isinstance(value, str) or not value for value in descriptor.values())):
+            raise ValueError('Exact closed workspace descriptor required')
+        resp = await self.request(ujoin(self.api_url, 'cps', 'workspace-accounts'),
+                                  method='POST', body=json.dumps(descriptor))
+        return json.loads(resp.body)
 
     async def create_user(self, username: str):
         """Create a single user in the Hub.
