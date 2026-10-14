@@ -58,10 +58,12 @@ export const requests = {
   get: async (
     url: string,
     params: Record<string, string> | undefined = undefined,
+    options: Pick<RequestInit, "signal" | "cache"> = {},
   ): Promise<unknown> => {
     const settings: RequestInit = {
       ...baseSettings,
       method: "GET",
+      ...options,
     };
     if (params !== undefined) {
       url += "?" + new URLSearchParams(params).toString();

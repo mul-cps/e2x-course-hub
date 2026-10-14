@@ -663,6 +663,8 @@ test("late profile response cannot replace the current workspace scope", async (
   page,
 }) => {
   let oldRequest: Route | undefined;
+  let oldCancelled = false;
+  page.on("requestfailed", request => { if (new URL(request.url()).searchParams.get("workspace") === "old-workspace") oldCancelled = true; });
   await page.route(
     (url) => url.pathname === "/api/compute",
     async (route) => {
@@ -705,10 +707,7 @@ test("late profile response cannot replace the current workspace scope", async (
     "cpu",
     "interactive-shared-5",
   ]);
-  const oldResponse = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).searchParams.get("workspace") === "old-workspace",
-  );
+  await expect.poll(() => oldCancelled).toBe(true);
   await oldRequest!.fulfill({
     json: {
       profiles: {
@@ -721,7 +720,6 @@ test("late profile response cannot replace the current workspace scope", async (
       },
     },
   });
-  await (await oldResponse).finished();
   await page.evaluate(
     () =>
       new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
@@ -776,16 +774,11 @@ test("changing workspace identifier prevents saving its previous pilot profile",
   await page.getByLabel("Identifier", { exact: false }).fill("other-workspace");
   await expect(picker.locator("option")).toHaveText([
     "Select compute profile",
+    "interactive-shared-5 (unavailable)",
     "cpu",
   ]);
-  // The draft retains its previous selection, so the save guard must reject it.
-  await picker.evaluate((element) => {
-    const option = document.createElement("option");
-    option.value = "interactive-shared-5";
-    option.textContent = "interactive-shared-5";
-    (element as HTMLSelectElement).append(option);
-    (element as HTMLSelectElement).value = option.value;
-  });
+  // Retain the user's draft visibly; unavailable choices cannot be submitted.
+  await expect(picker).toHaveValue("interactive-shared-5");
   await page.getByRole("button", { name: "Save record" }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
     "Select an available interactive profile.",
@@ -1065,6 +1058,8 @@ test("existing workspace compute details discard closed workspace stale response
   page,
 }) => {
   let delayed: Route | undefined;
+  let oldCancelled = false;
+  page.on("requestfailed", request => { if (new URL(request.url()).searchParams.get("workspace") === "ws-a") oldCancelled = true; });
   await page.route(
     (url) => url.pathname === "/api/local/workspaces",
     (route) =>
@@ -1117,16 +1112,12 @@ test("existing workspace compute details discard closed workspace stale response
   await expect(
     dialog.getByTestId("workspace-available-profiles").locator("li"),
   ).toHaveText(["cpu-b"]);
-  const oldResponse = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).searchParams.get("workspace") === "ws-a",
-  );
+  await expect.poll(() => oldCancelled).toBe(true);
   await delayed!.fulfill({
     json: {
       profiles: { "stale-profile": { kind: "interactive", enabled: true } },
     },
   });
-  await oldResponse;
   await expect(
     dialog.getByTestId("workspace-available-profiles").locator("li"),
   ).toHaveText(["cpu-b"]);

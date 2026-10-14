@@ -105,3 +105,12 @@ export default defineConfig([
   },
 ]);
 ```
+
+
+## Current admin data
+
+Compute and shared workspace records, profile choices and authorized references are API-backed. Read-only discovery refreshes every 20 seconds while the page is visible. Each reader has one active request, an eight-second deadline and a generation guard; navigation, changed scope, manual refresh and visibility changes cancel obsolete reads. Returning to a visible page requests current data immediately. Reads keep same-origin credentials and XSRF headers and use `cache: "no-store"`; mutation behavior is unchanged.
+
+Refresh updates record and permission data without replacing a grant/workspace draft, the person/search input, the open dialog or its selected profile. A removed choice stays selected and is labeled unavailable. Saving an unavailable or unverified profile remains blocked; the API always enforces the final policy. An open workspace profile reflects the latest stored state while preserving an in-progress proposed profile. Failed or timed-out reads retain the last records with a stale/error indicator and retry automatically; old readiness is not new authority.
+
+Run `npm run test:ui` for the real Chromium lifecycle, cancellation, stale-response, permission-change, focus, authentication and mutation regressions. `npm run build` verifies TypeScript and the deployable frontend bundle. Passing these checks produces a source candidate; both-console image/deployment qualification remains a separate release step.

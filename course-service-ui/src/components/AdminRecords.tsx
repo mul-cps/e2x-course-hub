@@ -14,6 +14,7 @@ import {
 import { requests } from "../api/client";
 import { config } from "../config";
 import PlatformStatusPanel from "./PlatformStatusPanel";
+import { useReadonlyRefresh } from "../hooks/useReadonlyRefresh";
 
 type Row = Record<string, unknown>;
 type Field = {
@@ -217,6 +218,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const [records, setRecords] = useState<Row[]>([]),
     [refs, setRefs] = useState<Record<string, Row[]>>({});
   const [loadFailed, setLoadFailed] = useState(false);
+  const [recordLookup, setRecordLookup] = useState("");
   const [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -312,26 +314,37 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     };
   }, [dialogOpen, busy]);
   const url = `${config.apiUrl}/${kind === "compute" ? "compute" : `local/${kind}`}`;
-  async function refresh(lookup = person) {
-    setLoading(true);
-    setLoadFailed(false);
-    setError("");
-    try {
-      const result = await requests.get(
+  const automatic = kind === "compute" || kind === "workspaces";
+  const recordRead = useReadonlyRefresh(
+    `${url}:${recordLookup}`,
+    true,
+    (signal) =>
+      requests.get(
         url,
-        kind === "compute" && lookup ? { person: lookup } : undefined,
-      );
+        kind === "compute" && recordLookup
+          ? { person: recordLookup }
+          : undefined,
+        { signal, cache: "no-store" },
+      ),
+    (result) => {
       setRecords(rowsFrom(result));
-      setView(lookup && kind === "compute" ? "grants" : "profiles");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setLoadFailed(true);
-    } finally {
       setLoading(false);
-    }
+      setLoadFailed(false);
+    },
+    () => {
+      setLoading(false);
+      if (!records.length) setLoadFailed(true);
+    },
+    automatic,
+  );
+  async function refresh(lookup = recordLookup) {
+    if (kind === "compute" && lookup !== recordLookup) {
+      setRecordLookup(lookup);
+      setView(lookup ? "grants" : "profiles");
+      setLoading(true);
+    } else await recordRead.refresh();
   }
   useEffect(() => {
-    let active = true;
     setLoading(true);
     setRecords([]);
     setLoadFailed(false);
@@ -341,64 +354,48 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     setError("");
     setNotice("");
     setPerson("");
+    setRecordLookup("");
     setView("profiles");
-    requests
-      .get(url)
-      .then((r) => {
-        if (active) setRecords(rowsFrom(r));
-      })
-      .catch((e) => {
-        if (active) {
-          setError(String(e));
-          setLoadFailed(true);
-        }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
   }, [url]);
-  useEffect(() => {
-    let active = true;
-    const needed = [
-      ...new Set([
-        ...fields[kind].flatMap((f) =>
-          f.reference && !(kind === "workspaces" && f.reference === "profiles")
-            ? [f.reference]
-            : [],
-        ),
-        ...(kind === "workspaces" ? ["memberships"] : []),
-        ...(kind === "compute" && config.user.admin ? ["workspaces"] : []),
-      ]),
-    ];
-    Promise.all(
-      needed.map(async (key) => {
-        try {
-          return [
-            key,
-            rowsFrom(
-              await requests.get(
-                `${config.apiUrl}/${key === "profiles" ? "compute" : `local/${key}`}`,
+  const needed = [
+    ...new Set([
+      ...fields[kind].flatMap((f) =>
+        f.reference && !(kind === "workspaces" && f.reference === "profiles")
+          ? [f.reference]
+          : [],
+      ),
+      ...(kind === "workspaces" ? ["memberships"] : []),
+      ...(kind === "compute" && config.user.admin ? ["workspaces"] : []),
+    ]),
+  ];
+  const referenceRead = useReadonlyRefresh(
+    `references:${kind}`,
+    true,
+    (signal) =>
+      Promise.all(
+        needed.map(
+          async (key) =>
+            [
+              key,
+              rowsFrom(
+                await requests.get(
+                  `${config.apiUrl}/${key === "profiles" ? "compute" : `local/${key}`}`,
+                  undefined,
+                  { signal, cache: "no-store" },
+                ),
               ),
-            ),
-          ] as const;
-        } catch {
-          return [key, []] as const;
-        }
-      }),
-    ).then((items) => {
-      if (active)
-        setRefs((previous) => ({ ...previous, ...Object.fromEntries(items) }));
-    });
-    return () => {
-      active = false;
-    };
-  }, [kind]);
+            ] as const,
+        ),
+      ),
+    (items) =>
+      setRefs((previous) => ({ ...previous, ...Object.fromEntries(items) })),
+    undefined,
+    automatic,
+  );
   const grantBaseProfiles = (refs.profiles ?? []).filter((profile) => {
     const gpu = profile.gpu;
     return (
+      profile.enabled !== false &&
       !profile.nativeGroupWorkspace &&
       !profile.nativePilotWorkspace &&
       !(gpu && typeof gpu === "object" && (gpu as Row).mode !== "none") &&
@@ -423,96 +420,102 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   ];
   const grantDialogOpen = kind === "compute" && draft !== null;
   useEffect(() => {
-    if (!grantDialogOpen || !grantWorkspace) return;
-    let active = true;
-    setGrantDiscovery({
-      workspace: grantWorkspace,
-      loading: true,
-      profiles: [],
-      failed: false,
-    });
-    requests
-      .get(`${config.apiUrl}/compute`, { workspace: grantWorkspace })
-      .then((result) => {
-        if (active)
-          setGrantDiscovery({
-            workspace: grantWorkspace,
-            loading: false,
-            profiles: rowsFrom(result),
-            failed: false,
-          });
-      })
-      .catch(() => {
-        if (active)
-          setGrantDiscovery({
-            workspace: grantWorkspace,
-            loading: false,
-            profiles: [],
-            failed: true,
-          });
+    if (grantDialogOpen && grantWorkspace)
+      setGrantDiscovery({
+        workspace: grantWorkspace,
+        loading: true,
+        profiles: [],
+        failed: false,
       });
-    return () => {
-      active = false;
-    };
   }, [grantDialogOpen, grantWorkspace]);
+  const grantRead = useReadonlyRefresh(
+    `grant:${grantWorkspace}`,
+    grantDialogOpen && Boolean(grantWorkspace),
+    (signal) =>
+      requests.get(
+        `${config.apiUrl}/compute`,
+        { workspace: grantWorkspace },
+        { signal, cache: "no-store" },
+      ),
+    (result) =>
+      setGrantDiscovery({
+        workspace: grantWorkspace,
+        loading: false,
+        profiles: rowsFrom(result),
+        failed: false,
+      }),
+    () =>
+      setGrantDiscovery((previous) => ({
+        ...previous,
+        loading: false,
+        failed: true,
+      })),
+  );
   const workspaceProfileScope =
     kind === "workspaces" ? String(draft?.id ?? "") : "";
   useEffect(() => {
-    if (kind !== "workspaces") return;
-    let active = true;
-    setRefs((previous) => ({ ...previous, profiles: [] }));
-    requests
-      .get(
+    if (kind === "workspaces")
+      setRefs((previous) => ({ ...previous, profiles: [] }));
+  }, [kind, workspaceProfileScope]);
+  const workspaceRead = useReadonlyRefresh(
+    `workspace:${workspaceProfileScope}`,
+    kind === "workspaces",
+    (signal) =>
+      requests.get(
         `${config.apiUrl}/compute`,
         workspaceProfileScope
           ? { workspace: workspaceProfileScope }
           : undefined,
-      )
-      .then((result) => {
-        if (active)
-          setRefs((previous) => ({ ...previous, profiles: rowsFrom(result) }));
-      })
-      .catch(() => {
-        if (active) setRefs((previous) => ({ ...previous, profiles: [] }));
-      });
-    return () => {
-      active = false;
-    };
-  }, [kind, workspaceProfileScope]);
+        { signal, cache: "no-store" },
+      ),
+    (result) =>
+      setRefs((previous) => ({ ...previous, profiles: rowsFrom(result) })),
+  );
+  const detailId = String(profileDetails?.id ?? "");
   useEffect(() => {
-    if (kind !== "workspaces" || !profileDetails) return;
-    let active = true;
-    const workspace = String(profileDetails.id);
-    setProfileDiscovery({
-      workspace,
-      loading: true,
-      profiles: [],
-      failed: false,
-    });
-    requests
-      .get(`${config.apiUrl}/compute`, { workspace })
-      .then((result) => {
-        if (active)
-          setProfileDiscovery({
-            workspace,
-            loading: false,
-            profiles: rowsFrom(result),
-            failed: false,
-          });
-      })
-      .catch(() => {
-        if (active)
-          setProfileDiscovery({
-            workspace,
-            loading: false,
-            profiles: [],
-            failed: true,
-          });
+    if (kind === "workspaces" && detailId)
+      setProfileDiscovery({
+        workspace: detailId,
+        loading: true,
+        profiles: [],
+        failed: false,
       });
-    return () => {
-      active = false;
-    };
-  }, [kind, profileDetails]);
+  }, [kind, detailId]);
+  const detailRead = useReadonlyRefresh(
+    `details:${detailId}`,
+    kind === "workspaces" && Boolean(detailId),
+    (signal) =>
+      requests.get(
+        `${config.apiUrl}/compute`,
+        { workspace: detailId },
+        { signal, cache: "no-store" },
+      ),
+    (result) =>
+      setProfileDiscovery({
+        workspace: detailId,
+        loading: false,
+        profiles: rowsFrom(result),
+        failed: false,
+      }),
+    () =>
+      setProfileDiscovery((previous) => ({
+        ...previous,
+        loading: false,
+        failed: true,
+      })),
+  );
+  useEffect(() => {
+    setProfileDetails((previous) => {
+      if (!previous) return previous;
+      const current = records.find((record) => record.id === previous.id);
+      return current ? { ...previous, ...current } : previous;
+    });
+  }, [records]);
+  const selectedRecordUnavailable = Boolean(
+    profileDetails &&
+    !loading &&
+    !records.some((record) => record.id === profileDetails.id),
+  );
   const detailProfiles = profileDiscovery.profiles.filter((profile) => {
     if (profile.kind !== "interactive" || profile.enabled !== true)
       return false;
@@ -532,6 +535,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     profileDiscovery.loading ||
     profileDiscovery.workspace !== String(profileDetails?.id);
   const profileEditable =
+    !selectedRecordUnavailable &&
+    !recordRead.state.stale &&
     profileDetails?.state === "stopped" &&
     (profileDetails.source == null || profileDetails.source === "local") &&
     profileDetails.external_id == null &&
@@ -544,37 +549,75 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     setGroupApproval(null);
     setApprovalError("");
     setApprovalProfile("");
-    if (kind !== "workspaces" || !profileDetails) return;
-    let active = true;
-    requests.get(`${config.apiUrl}/native-group-approvals`).then((result) => {
-      const registry = result as Row;
-      const valid = registry && typeof registry.revision === "string" &&
-        /^sha256:[0-9a-f]{64}$/.test(registry.revision) &&
-        typeof registry.ready === "boolean" && Array.isArray(registry.qualified_profiles) &&
-        registry.qualified_profiles.every((profile) => typeof profile === "string") &&
-        registry.approvals && typeof registry.approvals === "object" && !Array.isArray(registry.approvals);
-      if (active) setGroupApproval(valid ? registry : null);
-    }).catch(() => {
-      // The backend reserves qualification changes for console administrators.
-      if (active) setGroupApproval(null);
-    });
-    return () => { active = false; };
-  }, [kind, profileDetails]);
+  }, [kind, detailId]);
+  const approvalRead = useReadonlyRefresh(
+    `approval:${detailId}`,
+    kind === "workspaces" && Boolean(detailId) && config.user.admin,
+    async (signal) => {
+      const registry = (await requests.get(
+        `${config.apiUrl}/native-group-approvals`,
+        undefined,
+        { signal, cache: "no-store" },
+      )) as Row;
+      if (
+        !registry ||
+        typeof registry.revision !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/.test(registry.revision) ||
+        typeof registry.ready !== "boolean" ||
+        !Array.isArray(registry.qualified_profiles) ||
+        !registry.qualified_profiles.every(
+          (profile) => typeof profile === "string",
+        ) ||
+        !registry.approvals ||
+        typeof registry.approvals !== "object" ||
+        Array.isArray(registry.approvals)
+      )
+        throw new Error("GPU approval could not be verified.");
+      return registry;
+    },
+    (registry) => setGroupApproval(registry),
+    () => {},
+  );
+  const refreshStates = [
+    recordRead.state,
+    referenceRead.state,
+    ...(kind === "workspaces" ? [workspaceRead.state] : []),
+    ...(grantDialogOpen && grantWorkspace ? [grantRead.state] : []),
+    ...(kind === "workspaces" && detailId ? [detailRead.state] : []),
+  ];
+  const refreshFailure = refreshStates.find((state) => state.error)?.error;
+  const dataStale = refreshStates.some((state) => state.stale);
   const qualifiedProfiles = Array.isArray(groupApproval?.qualified_profiles)
-    ? groupApproval.qualified_profiles.filter((value): value is string => typeof value === "string")
+    ? groupApproval.qualified_profiles.filter(
+        (value): value is string => typeof value === "string",
+      )
     : [];
-  const approvedGroup = (groupApproval?.approvals as Record<string, Row> | undefined)?.[String(profileDetails?.id)];
+  const approvedGroup = (
+    groupApproval?.approvals as Record<string, Row> | undefined
+  )?.[String(profileDetails?.id)];
   async function updateGroupApproval(revoke = false) {
-    if (!profileDetails || !groupApproval || busy || (!revoke && !approvalProfile)) return;
+    if (
+      approvalRead.state.stale ||
+      selectedRecordUnavailable ||
+      !profileDetails ||
+      !groupApproval ||
+      busy ||
+      (!revoke && !approvalProfile)
+    )
+      return;
     setBusy(true);
     setApprovalError("");
     try {
       await requests.post(
         `${config.apiUrl}/native-group-approvals/${encodeURIComponent(String(profileDetails.id))}/${revoke ? "revoke" : "approve"}`,
-        { expected_revision: groupApproval.revision, ...(!revoke ? { profile: approvalProfile } : {}) },
+        {
+          expected_revision: groupApproval.revision,
+          ...(!revoke ? { profile: approvalProfile } : {}),
+        },
       );
       await refresh();
-      setProfileDetails({ ...profileDetails });
+      await approvalRead.refresh();
+      await detailRead.refresh();
     } catch (e) {
       setApprovalError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -655,6 +698,14 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       )
         throw new Error(
           "Select profiles verified for the current shared workspace or clear unavailable choices.",
+        );
+      if (
+        (kind === "compute" || kind === "workspaces") &&
+        (referenceRead.state.stale ||
+          (kind === "workspaces" && workspaceRead.state.stale))
+      )
+        throw new Error(
+          "Reference data is stale. Wait for a successful refresh before saving.",
         );
       const payload: Row = {};
       for (const f of fields[kind]) {
@@ -794,7 +845,15 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
               "source",
             ]
           : kind === "workspaces"
-            ? ["id", "course_id", "group_id", "profile", "state", "account_state", "notice"]
+            ? [
+                "id",
+                "course_id",
+                "group_id",
+                "profile",
+                "state",
+                "account_state",
+                "notice",
+              ]
             : kind === "assignments"
               ? ["id", "course_id", "term_id", "mode", "state"]
               : [
@@ -901,6 +960,23 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
           <CheckCircle2 size={18} />
           {notice}
         </div>
+      )}
+      {(kind === "compute" || kind === "workspaces") && (
+        <p
+          className="field-help"
+          role="status"
+          data-testid="admin-data-freshness"
+        >
+          {refreshStates.some((state) => state.paused)
+            ? "Automatic refresh paused while this page is hidden."
+            : refreshFailure
+              ? `Data is stale: ${refreshFailure} Showing the last successful read. Retrying automatically.`
+              : dataStale
+                ? refreshStates.some((state) => state.updatedAt !== null)
+                  ? "Data is stale. Checking current data…"
+                  : "Checking current data…"
+                : "Data is current. Refreshes automatically every 20 seconds."}
+        </p>
       )}
       <div className="records-panel">
         <div className="table-toolbar">
@@ -1020,7 +1096,17 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
                       >
                         {c === "account_state" ? (
-                          display(({ ready: "Account ready", not_provisioned: "Provision on Start", review_required: "Review required", recovery_required: "Recovery required", unavailable: "Status unavailable" } as Record<string, string>)[String(r[c])] ?? "Status unavailable")
+                          display(
+                            (
+                              {
+                                ready: "Account ready",
+                                not_provisioned: "Provision on Start",
+                                review_required: "Review required",
+                                recovery_required: "Recovery required",
+                                unavailable: "Status unavailable",
+                              } as Record<string, string>
+                            )[String(r[c])] ?? "Status unavailable",
+                          )
                         ) : c === "execution" ? (
                           execution(r)
                         ) : c === "qualification" ? (
@@ -1246,6 +1332,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 Fields marked * are required. Changes are checked against your
                 permissions and recorded in the audit log.
               </p>
+              {refreshFailure &&
+                (kind === "compute" || kind === "workspaces") && (
+                  <p className="info-note" role="status">
+                    Data is stale: {refreshFailure} Your changes are preserved.
+                  </p>
+                )}
               <div className="form-grid">
                 {kind === "compute" && config.user.admin && (
                   <label className="span-two">
@@ -1275,6 +1367,18 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       }}
                     >
                       <option value="">No shared workspace</option>
+                      {grantWorkspace &&
+                        !(refs.workspaces ?? []).some(
+                          (workspace) =>
+                            workspace.id === grantWorkspace &&
+                            (workspace.source == null ||
+                              workspace.source === "local") &&
+                            workspace.external_id == null,
+                        ) && (
+                          <option value={grantWorkspace} disabled>
+                            {grantWorkspace} (unavailable)
+                          </option>
+                        )}
                       {(refs.workspaces ?? [])
                         .filter(
                           (workspace) =>
@@ -1382,7 +1486,11 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                             ))}
                           </select>
                         ) : f.reference &&
-                          (options.length > 0 || f.reference === "profiles") ? (
+                          (options.length > 0 ||
+                            f.reference === "profiles" ||
+                            (f.type === "list"
+                              ? (value as string[]).length > 0
+                              : Boolean(value))) ? (
                           <select
                             aria-label={f.label}
                             multiple={f.type === "list"}
@@ -1409,6 +1517,31 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                                 Select {f.label.toLowerCase()}
                               </option>
                             )}
+                            {(f.type === "list"
+                              ? (value as string[])
+                              : [String(value)]
+                            )
+                              .filter(
+                                (selected) =>
+                                  selected &&
+                                  !options.some(
+                                    (record, index) =>
+                                      String(
+                                        f.reference === "memberships"
+                                          ? record.person_id
+                                          : (record.id ?? record.name ?? index),
+                                      ) === selected,
+                                  ),
+                              )
+                              .map((selected) => (
+                                <option
+                                  key={selected}
+                                  value={selected}
+                                  disabled
+                                >
+                                  {selected} (unavailable)
+                                </option>
+                              ))}
                             {options.map((r, i) => {
                               const val = String(
                                 f.reference === "memberships"
@@ -1614,12 +1747,14 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 )}
               </div>
             )}
-            {profileEditable &&
+            {(profileEditable || profileEditing) &&
               (profileEditing ? (
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
                     if (
+                      !profileEditable ||
+                      detailRead.state.stale ||
                       detailsPending ||
                       profileDiscovery.failed ||
                       !detailProfiles.some(
@@ -1643,14 +1778,20 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       aria-label="New compute profile"
                       required
                       value={selectedProfile}
-                      disabled={
-                        busy || detailsPending || profileDiscovery.failed
-                      }
+                      disabled={busy || detailsPending}
                       onChange={(event) =>
                         setSelectedProfile(event.target.value)
                       }
                     >
                       <option value="">Select a profile</option>
+                      {selectedProfile &&
+                        !detailProfiles.some(
+                          (profile) => profile.id === selectedProfile,
+                        ) && (
+                          <option value={selectedProfile} disabled>
+                            {selectedProfile} (unavailable)
+                          </option>
+                        )}
                       {detailProfiles.map((profile) => (
                         <option
                           key={String(profile.id)}
@@ -1677,6 +1818,8 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       className="primary-button"
                       disabled={
                         busy ||
+                        !profileEditable ||
+                        detailRead.state.stale ||
                         detailsPending ||
                         profileDiscovery.failed ||
                         selectedProfile === profileDetails.profile ||
@@ -1711,7 +1854,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   </button>
                 </div>
               ))}
-            {!profileEditable && <p className="info-note">{profileDetails.state !== "stopped" ? "Stop and reconcile this workspace before changing its compute profile." : "Externally managed or archived workspace profiles are read-only."}</p>}
+            {!profileEditable && (
+              <p className="info-note">
+                {profileDetails.state !== "stopped"
+                  ? "Stop and reconcile this workspace before changing its compute profile."
+                  : "Externally managed or archived workspace profiles are read-only."}
+              </p>
+            )}
             <p className="form-intro">
               Profiles are managed through shared compute policy. Starting this
               workspace still checks member permissions, resource ceilings and
@@ -1722,11 +1871,13 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                 <div className="full-width">
                   <h3>Group GPU approval</h3>
                   <p role="status">
-                    {approvedGroup
-                      ? groupApproval.ready === true
-                        ? "Approved configuration is loaded by both Hubs, the gateway and the GPU node."
-                        : "Approval saved. Activation is waiting for both Hubs, the gateway and the GPU node."
-                      : "This workspace does not have a GPU approval."}
+                    {approvalRead.state.stale
+                      ? "GPU approval data is stale; current activation is unconfirmed."
+                      : approvedGroup
+                        ? groupApproval.ready === true
+                          ? "Approved configuration is loaded by both Hubs, the gateway and the GPU node."
+                          : "Approval saved. Activation is waiting for both Hubs, the gateway and the GPU node."
+                        : "This workspace does not have a GPU approval."}
                   </p>
                   <p className="form-intro">
                     Stop the workspace before changing its approval. Approval
@@ -1744,6 +1895,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     disabled={busy}
                   >
                     <option value="">Select profile</option>
+                    {approvalProfile &&
+                      !qualifiedProfiles.includes(approvalProfile) && (
+                        <option value={approvalProfile} disabled>
+                          {approvalProfile} (unavailable)
+                        </option>
+                      )}
                     {qualifiedProfiles.map((profile) => (
                       <option key={profile} value={profile}>
                         {profile}
@@ -1755,6 +1912,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   <button
                     disabled={
                       busy ||
+                      approvalRead.state.stale ||
+                      selectedRecordUnavailable ||
+                      !qualifiedProfiles.includes(approvalProfile) ||
                       !approvalProfile ||
                       profileDetails.state !== "stopped" ||
                       profileDetails.archived === true ||
@@ -1766,7 +1926,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   </button>
                   {approvedGroup && (
                     <button
-                      disabled={busy || profileDetails.state !== "stopped"}
+                      disabled={
+                        busy ||
+                        approvalRead.state.stale ||
+                        selectedRecordUnavailable ||
+                        profileDetails.state !== "stopped"
+                      }
                       onClick={() => void updateGroupApproval(true)}
                     >
                       Revoke GPU approval
@@ -1829,6 +1994,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                   onChange={(e) => setMembership(e.target.value)}
                 >
                   <option value="">Select member</option>
+                  {membership &&
+                    !(refs.memberships ?? []).some(
+                      (member) =>
+                        member.id === membership &&
+                        member.course_id === removeMember.course_id &&
+                        member.group_id === removeMember.group_id &&
+                        (!removeMember.term_id ||
+                          member.term_id === removeMember.term_id),
+                    ) && (
+                      <option value={membership} disabled>
+                        {membership} (unavailable)
+                      </option>
+                    )}
                   {(refs.memberships ?? [])
                     .filter(
                       (m) =>
