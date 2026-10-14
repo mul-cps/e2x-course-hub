@@ -143,6 +143,14 @@ class WorkspaceAccountAdapter:
         return dict(rows[0])
 
     def _model(self, user, binding, *, receipt=None, require_stopped=True):
+        allowed_roles = {"user", self.role}
+        # The permanent Hub provisioning POST validates the actual runtime role
+        # scopes, RoleID, Source-service custody and immutable identity before
+        # this model check. Accept its computed name only for the exact bound
+        # registered owner; role names do not replace that Hub-side authority.
+        _, registered_owner, _ = _creation_descriptor(self.provider.console, binding)
+        if binding["hub_user"] == registered_owner:
+            allowed_roles.add("cps-workspace-runtime-" + registered_owner)
         if (
             not isinstance(user, dict)
             or user.get("name") != binding["hub_user"]
@@ -151,7 +159,7 @@ class WorkspaceAccountAdapter:
             or not user["created"]
             or not isinstance(user.get("roles"), list)
             or any(not isinstance(role, str) for role in user["roles"])
-            or set(user["roles"]) - {"user", self.role}
+            or set(user["roles"]) - allowed_roles
             or not isinstance(user.get("groups"), list)
             or any(not isinstance(group, str) for group in user["groups"])
             or set(user["groups"]) - {self.group}

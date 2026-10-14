@@ -131,6 +131,29 @@ class PermanentSourceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             self.adapter._creation_receipt(value, self.adapter._binding(self.workspace))
 
+    async def test_registered_owner_accepts_exact_computed_minimal_runtime_role(self):
+        self.hub.users[OWNER] = dict(name=OWNER, created=receipt()['identity']['created'],
+            admin=False, roles=['cps-workspace-kernel', 'cps-workspace-runtime-' + OWNER],
+            groups=[GROUP], servers={})
+        self.hub.group['users'] = [OWNER]
+        await self.adapter.ensure(self.workspace, actor='instructor')
+        row = self.adapter._row(self.adapter._binding(self.workspace))
+        self.assertEqual(row['state'], 'ready')
+        self.assertEqual(json.loads(row['receipt']), receipt())
+        self.assertEqual(self.hub.posts, [BODY])
+
+    async def test_other_runtime_role_or_unregistered_owner_cannot_pass_model(self):
+        binding = self.adapter._binding(self.workspace)
+        user = dict(name=OWNER, created=receipt()['identity']['created'], admin=False,
+                    roles=['cps-workspace-kernel'], groups=[GROUP], servers={})
+        for role in ('cps-workspace-runtime-other', 'cps-workspace-control-' + OWNER):
+            with self.subTest(role=role), self.assertRaises(PermissionError):
+                self.adapter._model(dict(user, roles=['cps-workspace-kernel', role]), binding)
+        legacy = dict(binding, hub_user='legacy-owner')
+        with self.assertRaises(PermissionError):
+            self.adapter._model(dict(user, name='legacy-owner', roles=[
+                'cps-workspace-kernel', 'cps-workspace-runtime-legacy-owner']), legacy)
+
     async def test_successful_v7_and_source_creation_receipts_keep_legacy_owner(self):
         workspace = dict(self.workspace, hub_user='retained-legacy-owner')
         binding = self.adapter._binding(workspace)
