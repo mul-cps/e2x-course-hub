@@ -20,7 +20,8 @@ class LegacyRuntimeCustodyTests(unittest.IsolatedAsyncioTestCase):
         self.bound = {**self.workspace, **self.course["workspace_bindings"][0]}
         self.binding = self.adapter._binding(self.bound)
         self.original_row = self.adapter._row(self.binding)
-        self.hub.users["legacy-owner"]["roles"].append("cps-workspace-runtime-legacy-owner")
+        self.hub.users["legacy-owner"]["roles"] = [
+            "cps-workspace-kernel", "cps-workspace-runtime-legacy-owner"]
         self.hub.users["legacy-owner"]["id"] = 14
         self.hub.auth_header = {"Authorization": "token fixture-source-service"}
         self.requests = []
@@ -159,11 +160,22 @@ class LegacyRuntimeCustodyTests(unittest.IsolatedAsyncioTestCase):
                 await self.adapter.ensure(self.bound, actor="operator")
 
     async def test_legacy_without_runtime_role_retains_existing_behavior_without_custody(self):
-        self.hub.users["legacy-owner"]["roles"].remove("cps-workspace-runtime-legacy-owner")
+        self.hub.users["legacy-owner"]["roles"] = ["user", "cps-workspace-kernel"]
         self.response_status = 404
         await self.adapter.ensure(self.bound, actor="operator")
         self.assertEqual(await self.adapter.status(self.workspace), "ready")
         self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.adapter._row(self.binding), self.original_row)
+
+    async def test_enrolled_custody_rejects_restored_default_roles_or_missing_kernel_role(self):
+        for roles in (
+            ["cps-workspace-kernel", "cps-workspace-runtime-legacy-owner", "user"],
+            ["cps-workspace-kernel", "cps-workspace-runtime-legacy-owner", "self"],
+            ["cps-workspace-runtime-legacy-owner"],
+        ):
+            self.hub.users["legacy-owner"]["roles"] = roles
+            with self.subTest(roles=roles), self.assertRaises(PermissionError):
+                await self.adapter.ensure(self.bound, actor="operator")
         self.assertEqual(self.adapter._row(self.binding), self.original_row)
 
     async def test_removed_runtime_role_with_revoked_hub_custody_is_not_unenrolled(self):

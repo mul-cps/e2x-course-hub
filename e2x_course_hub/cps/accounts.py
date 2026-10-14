@@ -190,8 +190,12 @@ class WorkspaceAccountAdapter:
             row = self._row(binding)
             if row is None or row["state"] != "ready":
                 raise PermissionError("Completed persistent reviewed legacy adoption required")
-            allowed_roles.add(validate_custody(legacy_runtime_custody, source=self.provider.console,
-                binding=binding, user=user, receipt=json.loads(row["receipt"] or "null")))
+            runtime_role = validate_custody(legacy_runtime_custody, source=self.provider.console,
+                binding=binding, user=user, receipt=json.loads(row["receipt"] or "null"))
+            allowed_roles = {self.role, runtime_role}
+            if (any(not isinstance(role, str) for role in user["roles"])
+                    or set(user["roles"]) != allowed_roles):
+                raise PermissionError("Enrolled legacy owner requires exactly kernel and runtime roles")
         if (
             not isinstance(user, dict)
             or user.get("name") != binding["hub_user"]
