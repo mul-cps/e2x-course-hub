@@ -230,7 +230,7 @@ class ReviewedAdoption:
                 continue
             writer_records, writer_binding = await self._context(writer["id"])
             user = await self.hub.get_user(writer_binding["hub_user"])
-            identity = self.accounts._model(user, writer_binding)
+            identity = await self.accounts._validated_model(user, writer_binding)
             if (
                 writer["id"] == identifier
                 and row is None
@@ -354,7 +354,7 @@ class ReviewedAdoption:
                 # group stage are durable. Ambiguous grants retry by readback.
                 await self._actor(actor)
                 user = await self.hub.get_user(binding["hub_user"])
-                self.accounts._model(user, binding, receipt=receipt["identity"])
+                await self.accounts._validated_model(user, binding, receipt=receipt["identity"])
                 if self.accounts.group not in user["groups"]:
                     if row["state"] == "ready":
                         raise PermissionError(
@@ -362,7 +362,7 @@ class ReviewedAdoption:
                         )
                     await self.hub.add_users_to_group(self.accounts.group, [binding["hub_user"]])
                 user = await self.hub.get_user(binding["hub_user"])
-                self.accounts._model(user, binding, receipt=receipt["identity"])
+                await self.accounts._validated_model(user, binding, receipt=receipt["identity"])
                 group = await self.hub.get_group(self.accounts.group)
                 if (
                     self.accounts.group not in user["groups"]

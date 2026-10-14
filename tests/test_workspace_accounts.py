@@ -8,6 +8,8 @@ import sqlite3
 import unittest
 from pathlib import Path
 
+from tornado.httpclient import HTTPClientError
+
 from e2x_course_hub.api.errors import GroupNotFoundError, UserNotFoundError
 from e2x_course_hub.cps.providers import LocalCourseProvider
 from e2x_course_hub.cps.accounts import WorkspaceAccountAdapter
@@ -30,6 +32,15 @@ class HubFixture:
         self.create_gate = None
         self.receipts = {}
         self.posts = []
+        self.auth_header = {"Authorization": "token fixture-source-service"}
+
+        class UnenrolledHubClient:
+            async def fetch(self, request):
+                # Existing fixture owners predate optional runtime enrollment.
+                assert '/cps/legacy-workspace-runtime-custody?' in request.url
+                raise HTTPClientError(404)
+
+        self.client = UnenrolledHubClient()
 
     async def get_group(self, name):
         if self.group is None:

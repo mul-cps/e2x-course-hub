@@ -87,7 +87,7 @@ class WorkspaceAccountAdapter:
                 return "recovery_required"
             identity = self._receipt_identity(row)
             user = await self.hub.get_user(binding["hub_user"])
-            self._model(user, binding, receipt=identity, require_stopped=False)
+            await self._validated_model(user, binding, receipt=identity, require_stopped=False)
             group = await self.hub.get_group(self.group)
             if (
                 self.group not in user["groups"]
@@ -142,7 +142,40 @@ class WorkspaceAccountAdapter:
             )
         return dict(rows[0])
 
-    def _model(self, user, binding, *, receipt=None, require_stopped=True):
+    async def _validated_model(self, user, binding, *, receipt=None, require_stopped=True):
+        """Recheck adopted legacy custody, including removal of an enrolled role."""
+        _, registered_owner, _ = _creation_descriptor(self.provider.console, binding)
+        runtime_role = "cps-workspace-runtime-" + binding["hub_user"]
+        custody = None
+        if binding["hub_user"] != registered_owner:
+            row = self._row(binding)
+            persisted = json.loads(row["receipt"]) if row and row["receipt"] else None
+            reviewed = (row is not None and row["state"] == "ready" and isinstance(persisted, dict)
+                        and persisted.get("kind") == "reviewed_legacy_adoption")
+            if reviewed:
+                from .legacy_runtime import LegacyEnrollmentMissing, fetch_custody, validate_custody
+
+                identity = self._receipt_identity(row)
+                if not isinstance(user, dict) or identity != {key: user.get(key) for key in ("name", "created")}:
+                    raise PermissionError("Hub legacy identity differs from reviewed Source ownership")
+                try:
+                    custody = await fetch_custody(self.hub, binding)
+                except LegacyEnrollmentMissing:
+                    # The missing endpoint/row permits only the original model,
+                    # which still rejects every unproved legacy runtime role.
+                    pass
+                else:
+                    validate_custody(custody, source=self.provider.console, binding=binding,
+                                     user=user, receipt=persisted)
+                if self._row(binding) != row:
+                    raise PermissionError("Reviewed legacy Source ownership changed during Hub readback")
+            elif (isinstance(user, dict) and isinstance(user.get("roles"), list)
+                    and runtime_role in user["roles"]):
+                raise PermissionError("Completed persistent reviewed legacy adoption required")
+        return self._model(user, binding, receipt=receipt, require_stopped=require_stopped,
+                           legacy_runtime_custody=custody)
+
+    def _model(self, user, binding, *, receipt=None, require_stopped=True, legacy_runtime_custody=None):
         allowed_roles = {"user", self.role}
         # The permanent Hub provisioning POST validates the actual runtime role
         # scopes, RoleID, Source-service custody and immutable identity before
@@ -151,6 +184,14 @@ class WorkspaceAccountAdapter:
         _, registered_owner, _ = _creation_descriptor(self.provider.console, binding)
         if binding["hub_user"] == registered_owner:
             allowed_roles.add("cps-workspace-runtime-" + registered_owner)
+        elif legacy_runtime_custody is not None:
+            from .legacy_runtime import validate_custody
+
+            row = self._row(binding)
+            if row is None or row["state"] != "ready":
+                raise PermissionError("Completed persistent reviewed legacy adoption required")
+            allowed_roles.add(validate_custody(legacy_runtime_custody, source=self.provider.console,
+                binding=binding, user=user, receipt=json.loads(row["receipt"] or "null")))
         if (
             not isinstance(user, dict)
             or user.get("name") != binding["hub_user"]
@@ -384,11 +425,11 @@ class WorkspaceAccountAdapter:
                 "Previously created neutral account is missing; automatic recreation is forbidden"
             ) from error
         identity = self._receipt_identity(row)
-        self._model(user, binding, receipt=identity)
+        await self._validated_model(user, binding, receipt=identity)
         if self.group not in user["groups"]:
             await self.hub.add_users_to_group(self.group, [binding["hub_user"]])
             user = await self.hub.get_user(binding["hub_user"])
-            self._model(user, binding, receipt=identity)
+            await self._validated_model(user, binding, receipt=identity)
         verified_group = await self.hub.get_group(self.group)
         if (
             self.group not in user["groups"]
