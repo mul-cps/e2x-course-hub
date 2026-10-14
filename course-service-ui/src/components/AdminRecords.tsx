@@ -702,6 +702,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       if (
         (kind === "compute" || kind === "workspaces") &&
         (referenceRead.state.stale ||
+          (kind === "compute" &&
+            Boolean(grantWorkspace) &&
+            grantRead.state.stale) ||
           (kind === "workspaces" && workspaceRead.state.stale))
       )
         throw new Error(

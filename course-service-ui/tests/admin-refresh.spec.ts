@@ -36,6 +36,7 @@ async function setup(page: Page) {
         expires: "2026-12-01T00:00:00Z",
       },
     ],
+    projects: [{ id: "project-a", name: "Before project" }],
     recordReads: 0,
     held: false,
     writes: 0,
@@ -74,13 +75,15 @@ async function setup(page: Page) {
       if (url.pathname === "/api/native-group-approvals")
         return route.fulfill({ status: 403, json: { detail: "Unavailable" } });
       const records =
-        url.pathname === "/api/local/courses"
-          ? [{ id: "ml", name: "ML", source: "local" }]
-          : url.pathname === "/api/local/groups"
-            ? [{ id: "team", name: "Team", course_id: "ml" }]
-            : url.pathname === "/api/local/terms"
-              ? [{ id: "t", name: "Term", course_id: "ml" }]
-              : [];
+        url.pathname === "/api/local/projects"
+          ? data.projects
+          : url.pathname === "/api/local/courses"
+            ? [{ id: "ml", name: "ML", source: "local" }]
+            : url.pathname === "/api/local/groups"
+              ? [{ id: "team", name: "Team", course_id: "ml" }]
+              : url.pathname === "/api/local/terms"
+                ? [{ id: "t", name: "Term", course_id: "ml" }]
+                : [];
       return route.fulfill({ json: { records } });
     },
   );
@@ -402,4 +405,111 @@ test("superseded refresh in the same scope ignores an already buffered old respo
   await expect(
     page.getByRole("cell", { name: "running", exact: true }),
   ).toBeVisible();
+});
+
+test("a resumed grant read must be fresh before submitting a preserved GPU selection", async ({
+  page,
+}) => {
+  const data = await setup(page);
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    const control = window as unknown as {
+      holdGrant?: boolean;
+      finishGrant?: () => void;
+    };
+    window.fetch = (input, options) => {
+      const url = new URL(String(input), location.origin);
+      if (
+        url.pathname === "/api/compute" &&
+        url.searchParams.get("workspace") === "ws-a" &&
+        control.holdGrant
+      ) {
+        control.holdGrant = false;
+        return new Promise<Response>((resolve) => {
+          control.finishGrant = () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  profiles: {
+                    "interactive-shared-5": {
+                      kind: "interactive",
+                      enabled: true,
+                      nativeGroupWorkspace: "ws-a",
+                      gpu: { mode: "shared" },
+                    },
+                  },
+                }),
+                {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                },
+              ),
+            );
+        });
+      }
+      return original(input, options);
+    };
+  });
+  await page.goto("/compute");
+  await page.getByRole("button", { name: "Add grant", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Compute access" });
+  await dialog.getByLabel(/^Identifier/).fill("fresh-grant");
+  await dialog
+    .getByLabel("Canonical person ID", { exact: false })
+    .fill("person-a");
+  await dialog.getByLabel("Expires", { exact: false }).fill("2026-12-01T00:00");
+  await dialog
+    .getByLabel("Reason for access", { exact: false })
+    .fill("Preserved reason");
+  await dialog
+    .getByLabel("Shared workspace", { exact: true })
+    .selectOption("ws-a");
+  const profiles = dialog.getByLabel("Allowed profiles", { exact: true });
+  await profiles.selectOption("interactive-shared-5");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    (window as unknown as { holdGrant: boolean }).holdGrant = true;
+  });
+  data.projects[0].name = "Current project";
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(
+    dialog.getByLabel("Projects", { exact: true }).locator("option"),
+  ).toHaveText(["Current project"]);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          typeof (window as unknown as { finishGrant?: () => void })
+            .finishGrant,
+      ),
+    )
+    .toBe("function");
+  await dialog.getByRole("button", { name: "Save grant", exact: true }).click();
+  expect(data.writes).toBe(0);
+  await expect(dialog.getByRole("alert")).toContainText("stale");
+  await expect(profiles.locator("option:checked")).toHaveText(
+    "interactive-shared-5",
+  );
+  await expect(
+    dialog.getByLabel("Reason for access", { exact: false }),
+  ).toHaveValue("Preserved reason");
+  await page.evaluate(() =>
+    (window as unknown as { finishGrant: () => void }).finishGrant(),
+  );
+  await expect(page.getByTestId("admin-data-freshness")).toContainText(
+    "Data is current",
+  );
+  await dialog.getByRole("button", { name: "Save grant", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(data.writes).toBe(1);
 });

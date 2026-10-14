@@ -91,6 +91,8 @@ test("poll failure removes previous availability and navigation cancels polling"
     }),
   ).toBeVisible();
   await page.getByRole("link", { name: "Courses", exact: true }).click();
+  // Observe the committed destination, not just the link/history transition.
+  await expect(page.getByRole("heading", { name: "Courses", exact: true })).toBeVisible();
   const stoppedCalls = calls;
   await page.clock.fastForward(60000);
   expect(calls).toBe(stoppedCalls);
