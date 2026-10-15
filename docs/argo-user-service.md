@@ -26,8 +26,13 @@ cookie is Secure, SameSite=Lax and restricted to `/argo/`; it is readable for
 normal XSRF clients.
 
 Browser Authorization headers and URL tokens are ignored. The signed OAuth
-cookie supplies the actual visitor token. Only these server-created headers go
-to the fixed compute URL:
+cookie supplies the actual visitor token. Each browser request revalidates that
+token against the Hub using `use_cache=False`, so a revoked token cannot
+authorize another proxy request. On JupyterHub 5.5.2, `cache_max_age=0` means
+"cache forever" and does not disable identity caching; the explicit per-request
+override is required. This applies only to the independent Argo service and does
+not change the admin console authentication cache. Only these server-created
+headers go to the fixed compute URL:
 
 ```text
 Authorization: Bearer <actual visitor Hub OAuth token>

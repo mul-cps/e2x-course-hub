@@ -120,6 +120,11 @@ class ArgoHubOAuth(CPSHubOAuth):
         # caller-supplied Authorization or URL token from changing the visitor.
         return self._get_token_cookie(handler) if in_cookie else None
 
+    def user_for_token(self, token, use_cache=True, session_id='', *, sync=True):
+        # On Hub5, cache_max_age=0 means cache forever. Revalidate each browser
+        # cookie so a revoked token cannot authorize another proxy request.
+        return super().user_for_token(token, use_cache=False, session_id=session_id, sync=sync)
+
     def set_state_cookie(self, handler, next_url=None):
         # Native Argo redirects expired API sessions to /argo/login?redirect=...
         # Reauthorization always returns to the fixed owner-filtered landing page.
