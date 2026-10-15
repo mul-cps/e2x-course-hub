@@ -331,6 +331,24 @@ class ArgoServiceTest(AsyncHTTPTestCase):
             "Authorization": "Bearer visitor-alice"}, follow_redirects=False)
         self.assertEqual(no_cookie.code, 302)
 
+    def test_revoked_visitor_cookie_is_rechecked_before_proxy_forwarding(self):
+        # Exercise installed HubOAuth's real signed-cookie and token-cache path.
+        # Only the remote Hub API response is a fixture (hub_api in get_app).
+        self.assertEqual(jupyterhub.__version__, "5.5.2")
+        browser = self.headers("visitor-alice")
+        first = self.fetch("/argo/api/v1/info", headers=browser, follow_redirects=False)
+        self.assertEqual(first.code, 200)
+        self.assertEqual(json.loads(first.body)["visitor"], "visitor-alice")
+        forwarded = len(self.outbound)
+        checked = len(self.hub_calls)
+        self.identities.pop("visitor-alice")  # Hub no longer recognizes this token.
+        denied = self.fetch("/argo/api/v1/info", headers=browser, follow_redirects=False)
+        self.assertEqual(denied.code, 302)
+        self.assertEqual(len(self.hub_calls), checked + 1)
+        self.assertEqual(len(self.outbound), forwarded)
+        self.assertTrue(any(header.startswith(self.auth.cookie_name + "=")
+            for header in denied.headers.get_list("Set-Cookie")))
+
     def test_service_scope_and_user_kind_are_required_without_admin_roles(self):
         for token in ("visitor-no-scope", "service-token"):
             self.assertEqual(self.fetch("/argo/api/v1/info", headers=self.headers(token)).code, 403)
