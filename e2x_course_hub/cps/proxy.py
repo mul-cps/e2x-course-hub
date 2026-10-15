@@ -1,6 +1,6 @@
 """Same-origin authenticated visitor bridge; shared kernels have separate principals."""
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient, HTTPRequest
 from ..course_service.handlers.base import BaseHandler
@@ -30,12 +30,18 @@ class ComputeVisitorProxy(BaseHandler):
         if idempotency_key: headers['Idempotency-Key'] = idempotency_key
         content_type = self.request.headers.get('Content-Type')
         if content_type: headers['Content-Type'] = content_type
+        query = parse_qs(self.request.query, keep_blank_values=True)
+        download = (self.request.method == 'GET'
+                    and re.fullmatch(r'workflows/[A-Za-z0-9_.-]+/artifacts', path)
+                    and query in ({'download':['snapshot']}, {'download':['executed-notebook']}))
         response = await AsyncHTTPClient().fetch(HTTPRequest(
             url,method=self.request.method,headers=headers,
             body=self.request.body if self.request.method == 'POST' else None,
-            request_timeout=60,follow_redirects=False),raise_error=False)
+            request_timeout=90 if download else 60,follow_redirects=False),raise_error=False)
         self.set_status(response.code)
-        if response.headers.get('Content-Type'): self.set_header('Content-Type',response.headers['Content-Type'])
+        for header in ('Content-Type', 'Content-Disposition', 'Cache-Control',
+                       'X-Content-Type-Options', 'Content-Security-Policy'):
+            if response.headers.get(header): self.set_header(header, response.headers[header])
         self.finish(response.body)
 
     @web.authenticated

@@ -158,6 +158,57 @@ class HandlersTest(AsyncHTTPTestCase):
         for path in ['internal/v1/grants','../internal/v1/grants','workflows/x%2Flogs']:
             self.assertEqual(self.fetch('/proxy/'+path,headers={'X-Visitor':'alice'}).code,404)
 
+    def test_notebook_download_preserves_bytes_reviewed_headers_and_visitor(self):
+        calls = []
+        raw = b'\x00\xffnot-json\r\n'
+        headers = {'Content-Type':'application/octet-stream',
+            'Content-Disposition':'attachment; filename="executed.ipynb"',
+            'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
+            'Content-Security-Policy':'sandbox', 'Set-Cookie':'upstream=private',
+            'Location':'https://unreviewed.invalid/', 'X-Private-Upstream':'private'}
+        class Client:
+            async def fetch(self, request, **kwargs):
+                calls.append(request)
+                return NS(code=200, headers=headers, body=raw)
+        with patch('e2x_course_hub.cps.proxy.AsyncHTTPClient', return_value=Client()):
+            for visitor in ('alice','bob'):
+                for selector in ('snapshot','executed-notebook','%73napshot'):
+                    path = 'workflows/run-1/artifacts?download=' + selector
+                    result = self.fetch('/proxy/' + path, headers={
+                        'X-Visitor':visitor, 'Authorization':'Bearer spoofed-admin', 'X-CPS-Hub':'cit'})
+                    self.assertEqual(result.code, 200)
+                    self.assertEqual(result.body, raw)
+                    for header in ('Content-Type','Content-Disposition','Cache-Control',
+                                   'X-Content-Type-Options','Content-Security-Policy'):
+                        self.assertEqual(result.headers.get(header), headers[header])
+                    for header in ('Set-Cookie','Location','X-Private-Upstream'):
+                        self.assertNotIn(header, result.headers)
+                    request = calls[-1]
+                    self.assertEqual(request.url, 'https://gateway.example/v1/' + path)
+                    self.assertEqual(request.headers['Authorization'], 'Bearer ' + visitor)
+                    self.assertEqual(request.headers['X-CPS-Hub'], 'cps')
+                    self.assertEqual(request.request_timeout, 90)
+                    self.assertFalse(request.follow_redirects)
+
+    def test_json_and_non_download_requests_keep_existing_timeout_and_body(self):
+        calls = []
+        raw = b'{"notebook_artifacts":[{"url":"https://objects.invalid/file?signature=fixture"}]}'
+        class Client:
+            async def fetch(self, request, **kwargs):
+                calls.append(request)
+                return NS(code=409, headers={'Content-Type':'application/json'}, body=raw)
+        paths = ('workflows/run-1/artifacts', 'workflows/run-1/artifacts?download=other',
+            'workflows/run-1/artifacts?download=',
+            'workflows/run-1/artifacts?download=snapshot&download=executed-notebook',
+            'workflows/run-1/artifacts?download=snapshot&extra=1',
+            'workflows/run-1/logs?download=snapshot')
+        with patch('e2x_course_hub.cps.proxy.AsyncHTTPClient', return_value=Client()):
+            for path in paths:
+                result = self.fetch('/proxy/' + path, headers={'X-Visitor':'alice'})
+                self.assertEqual(result.code, 409)
+                self.assertEqual(result.body, raw)
+                self.assertEqual(calls[-1].request_timeout, 60)
+
     def test_referenced_group_cannot_be_changed_or_deleted(self):
         async def seed():
             await self.provider.put('courses',{'id':'c'},actor='admin')
