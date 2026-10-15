@@ -26,8 +26,13 @@ cookie is Secure, SameSite=Lax and restricted to `/argo/`; it is readable for
 normal XSRF clients.
 
 Browser Authorization headers and URL tokens are ignored. The signed OAuth
-cookie supplies the actual visitor token. Only these server-created headers go
-to the fixed compute URL:
+cookie supplies the actual visitor token. Each browser request revalidates that
+token against the Hub using `use_cache=False`, so a revoked token cannot
+authorize another proxy request. On JupyterHub 5.5.2, `cache_max_age=0` means
+"cache forever" and does not disable identity caching; the explicit per-request
+override is required. This applies only to the independent Argo service and does
+not change the admin console authentication cache. Only these server-created
+headers go to the fixed compute URL:
 
 ```text
 Authorization: Bearer <actual visitor Hub OAuth token>
@@ -92,7 +97,9 @@ writes. This bounds source-level capacity and buffering, but real slow-browser
 and concurrency load qualification remains required before production activation.
 
 Only fixed `.js`, `.css`, image and font asset paths and the reviewed workflow
-SPA routes are requested from the pinned native Argo backend at `/argo/`.
+SPA routes are requested from the pinned native Argo backend at its explicit
+root or `/argo` base path. The browser always retains the public `/argo/`
+prefix; a root backend receives `/main...js` for `/argo/main...js`.
 Asset requests carry no credential or browser header. `connect-src 'self'`
 prevents native UI connections to another authority. TLS certificate and
 hostname validation are always enabled for the Hub, compute and native asset
@@ -112,7 +119,7 @@ Every `ArgoServiceConfig` field can be supplied through an environment variable:
 | `ARGO_USER_HUB_API_URL` | Fixed existing Hub HTTPS API URL, ending in `/api` |
 | `ARGO_USER_HUB_AUTHORIZATION_URL` | Existing Hub HTTPS `/api/oauth2/authorize` URL |
 | `ARGO_USER_COMPUTE_URL` | Fixed HTTPS compute gateway origin, with no path |
-| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend URL ending in `/argo` |
+| `ARGO_USER_NATIVE_ARGO_URL` | Operator-pinned Argo 3.7.18 HTTPS backend URL at its root or `/argo` base path |
 | `ARGO_USER_HUB_CA_FILE` | Installed trusted CA bundle for the Hub API |
 | `ARGO_USER_COMPUTE_CA_FILE` | Installed trusted CA bundle for compute |
 | `ARGO_USER_NATIVE_ARGO_CA_FILE` | Installed trusted CA bundle for native Argo |

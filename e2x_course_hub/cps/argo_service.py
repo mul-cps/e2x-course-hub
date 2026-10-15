@@ -78,6 +78,8 @@ class ArgoServiceConfig:
             raise ValueError("a dedicated service-{source}-argo-ui OAuth client is required")
         if not self.oauth_client_secret or len(self.cookie_secret) < 32:
             raise ValueError("a dedicated client secret and >=32-character cookie secret are required")
+        if urlsplit(self.native_argo_url).path not in ("", "/", "/argo", "/argo/"):
+            raise ValueError("native_argo_url must use the reviewed root or /argo base path")
         for name in ("public_origin", "hub_api_url", "hub_authorization_url", "compute_url",
                      "native_argo_url"):
             normalized = _https_url(getattr(self, name), name,
@@ -87,8 +89,6 @@ class ArgoServiceConfig:
             raise ValueError("hub_api_url must identify the existing Hub API")
         if not self.hub_authorization_url.endswith("/api/oauth2/authorize"):
             raise ValueError("hub_authorization_url must identify the existing Hub OAuth endpoint")
-        if urlsplit(self.native_argo_url).path != "/argo":
-            raise ValueError("native_argo_url must use the reviewed /argo base path")
         for name in ("hub_ca_file", "compute_ca_file", "native_argo_ca_file"):
             if not Path(getattr(self, name)).is_file():
                 raise ValueError(name + " must identify an installed trusted CA bundle")
@@ -119,6 +119,11 @@ class ArgoHubOAuth(CPSHubOAuth):
         # Returning None there preserves Hub's cookie/XSRF checks and prevents a
         # caller-supplied Authorization or URL token from changing the visitor.
         return self._get_token_cookie(handler) if in_cookie else None
+
+    def user_for_token(self, token, use_cache=True, session_id='', *, sync=True):
+        # On Hub5, cache_max_age=0 means cache forever. Revalidate each browser
+        # cookie so a revoked token cannot authorize another proxy request.
+        return super().user_for_token(token, use_cache=False, session_id=session_id, sync=sync)
 
     def set_state_cookie(self, handler, next_url=None):
         # Native Argo redirects expired API sessions to /argo/login?redirect=...
@@ -339,6 +344,7 @@ class ArgoProxyHandler(ArgoHandler):
             raise web.HTTPError(405)
         if not is_api and not is_artifact:
             raise web.HTTPError(404)
+        object_request = is_artifact or path.startswith("api/v1/workflows/cps-workflows/")
         token = self.hub_auth.get_token(self)
         if not token:
             raise web.HTTPError(401)
@@ -354,7 +360,7 @@ class ArgoProxyHandler(ArgoHandler):
                               ca_certs=self.config.compute_ca_file,
                               request_timeout=STREAM_SECONDS if is_stream else (120 if is_artifact else 60))
         if is_stream or (is_artifact and self.request.method == "GET"):
-            await self._stream(request, artifact=is_artifact)
+            await self._stream(request, artifact=is_artifact, object_request=object_request)
             return
         try:
             response = await self._fetch_upstream(request)
@@ -362,6 +368,10 @@ class ArgoProxyHandler(ArgoHandler):
             return
         except HTTPClientError as error:
             raise web.HTTPError(502, reason="Compute service unavailable") from error
+        if object_request and response.code in (403, 404):
+            # Foreign and missing objects must disclose neither existence nor
+            # the downstream error body or its object-related headers.
+            raise web.HTTPError(404, reason="Resource not found")
         if 300 <= response.code < 400:
             raise web.HTTPError(502, reason="Upstream redirects are disabled")
         if len(response.body or b"") > MAX_RESPONSE_BYTES:
@@ -372,7 +382,7 @@ class ArgoProxyHandler(ArgoHandler):
                 self.set_header(name, response.headers[name])
         await self._finish_buffered(response.body)
 
-    async def _stream(self, request, *, artifact=False):
+    async def _stream(self, request, *, artifact=False, object_request=False):
         # Header inspection precedes chunk forwarding; error bodies, cookies,
         # redirect locations and authority-related headers never reach browsers.
         status = {"code": None, "type": None, "disposition": None, "length": None,
@@ -439,6 +449,10 @@ class ArgoProxyHandler(ArgoHandler):
                 self._abort_forward()
                 return
         else:
+            if object_request and response.code in (403, 404):
+                raise web.HTTPError(404, reason="Resource not found")
+            if response.code in (503, 504):
+                raise web.HTTPError(response.code, reason="Compute stream unavailable")
             if response.code != 200 or status["type"] not in allowed_types:
                 raise web.HTTPError(response.code if response.code in (401, 403, 404, 429) else 502,
                                     reason="Compute stream rejected")

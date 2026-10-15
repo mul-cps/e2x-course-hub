@@ -65,7 +65,9 @@ class ConfigTest(unittest.TestCase):
                 {"compute_url": "http://compute.example"},
                 {"compute_url": "https://user:secret@compute.example"},
                 {"compute_url": "https://compute.example/another"},
-                {"native_argo_url": "https://native-argo.example/"},
+                {"native_argo_url": "https://native-argo.example/foreign"},
+                {"native_argo_url": "https://native-argo.example//"},
+                {"native_argo_url": "https://native-argo.example/argo//"},
                 {"public_origin": "https://hub.example/?target=evil"},
                 {"compute_ca_file": "/missing/ca"},
             ):
@@ -81,6 +83,22 @@ class ConfigTest(unittest.TestCase):
             }, clear=True):
                 self.assertEqual(ArgoServiceConfig.from_env(), candidate)
 
+    def test_native_backend_accepts_reviewed_root_and_argo_paths(self):
+        with tempfile.NamedTemporaryFile() as ca:
+            candidate = config(ca.name)
+            for url, normalized in (
+                ("https://native-argo.example", "https://native-argo.example"),
+                ("https://native-argo.example/", "https://native-argo.example"),
+                ("https://native-argo.example:2746/", "https://native-argo.example:2746"),
+                ("https://native-argo.example/argo/", "https://native-argo.example/argo"),
+            ):
+                with self.subTest(url=url):
+                    try:
+                        actual = replace(candidate, native_argo_url=url)
+                    except ValueError as error:
+                        self.fail("reviewed native backend was rejected: " + str(error))
+                    self.assertEqual(actual.native_argo_url, normalized)
+
 
 class ArgoServiceTest(AsyncHTTPTestCase):
     def get_app(self):
@@ -92,6 +110,8 @@ class ArgoServiceTest(AsyncHTTPTestCase):
         self.stream_type = "text/event-stream"
         self.truncate_artifact = False
         self.artifact_body = b'{"cells":[]}\n'
+        self.compute_error_code = None
+        self.compute_error_type = None
         self.identities = {
             "visitor-alice": {"name": "alice", "admin": False, "kind": "user", "groups": [],
                               "scopes": ["access:services!service=cps-argo-ui"]},
@@ -138,12 +158,31 @@ class ArgoServiceTest(AsyncHTTPTestCase):
                 self.write(outer.identities.get(token) or {"missing": True})
 
         class Compute(web.RequestHandler):
+            def reject(self, path):
+                if outer.compute_error_code is None:
+                    return False
+                self.set_status(outer.compute_error_code)
+                content_type = ("application/octet-stream" if path.startswith("artifact-files/")
+                                else "text/event-stream" if path.endswith("/log")
+                                or "workflow-events/" in path else "application/json")
+                content_type = outer.compute_error_type or content_type
+                self.set_header("Content-Type", content_type)
+                self.set_header("Content-Disposition", 'attachment; filename="private-name.ipynb"')
+                self.set_header("Set-Cookie", "upstream-cookie=forbidden")
+                self.set_header("X-Secret", "private-upstream-header")
+                self.set_header("Location", "https://private-upstream.example")
+                self.set_header("WWW-Authenticate", "private-upstream-authority")
+                self.write("private-upstream-error-" + str(outer.compute_error_code))
+                return True
+
             async def get(self, path):
                 # Stand-in for the independently tested downstream ownership adapter.
                 # It authenticates the forwarded visitor, never the service secret.
                 token = self.request.headers.get("Authorization", "")[len("Bearer "):]
                 if token not in ("visitor-alice", "visitor-bob"):
                     raise web.HTTPError(401)
+                if self.reject(path):
+                    return
                 if path.startswith("artifact-files/"):
                     self.set_header("Content-Type", "application/octet-stream")
                     self.set_header("Content-Disposition", 'attachment; filename="executed.ipynb"')
@@ -176,6 +215,8 @@ class ArgoServiceTest(AsyncHTTPTestCase):
                     self.write({"visitor": token, "query": self.request.query})
 
             def head(self, path):
+                if self.reject(path):
+                    return
                 self.set_header("Content-Type", "application/x-ipynb+json")
 
         class Native(web.RequestHandler):
@@ -331,6 +372,24 @@ class ArgoServiceTest(AsyncHTTPTestCase):
             "Authorization": "Bearer visitor-alice"}, follow_redirects=False)
         self.assertEqual(no_cookie.code, 302)
 
+    def test_revoked_visitor_cookie_is_rechecked_before_proxy_forwarding(self):
+        # Exercise installed HubOAuth's real signed-cookie and token-cache path.
+        # Only the remote Hub API response is a fixture (hub_api in get_app).
+        self.assertEqual(jupyterhub.__version__, "5.5.2")
+        browser = self.headers("visitor-alice")
+        first = self.fetch("/argo/api/v1/info", headers=browser, follow_redirects=False)
+        self.assertEqual(first.code, 200)
+        self.assertEqual(json.loads(first.body)["visitor"], "visitor-alice")
+        forwarded = len(self.outbound)
+        checked = len(self.hub_calls)
+        self.identities.pop("visitor-alice")  # Hub no longer recognizes this token.
+        denied = self.fetch("/argo/api/v1/info", headers=browser, follow_redirects=False)
+        self.assertEqual(denied.code, 302)
+        self.assertEqual(len(self.hub_calls), checked + 1)
+        self.assertEqual(len(self.outbound), forwarded)
+        self.assertTrue(any(header.startswith(self.auth.cookie_name + "=")
+            for header in denied.headers.get_list("Set-Cookie")))
+
     def test_service_scope_and_user_kind_are_required_without_admin_roles(self):
         for token in ("visitor-no-scope", "service-token"):
             self.assertEqual(self.fetch("/argo/api/v1/info", headers=self.headers(token)).code, 403)
@@ -394,6 +453,25 @@ class ArgoServiceTest(AsyncHTTPTestCase):
         self.assertEqual(response.code, 502)
         self.assertNotIn("Location", response.headers)
 
+    def test_root_native_backend_keeps_public_argo_prefix_and_strips_it_upstream(self):
+        try:
+            self._app.settings["argo_config"] = replace(
+                self._app.settings["argo_config"], native_argo_url="https://native-argo.example/")
+        except ValueError as error:
+            self.fail("reviewed root asset backend was rejected: " + str(error))
+        for path, expected in (
+            ("/argo/workflows", "https://native-argo.example/"),
+            ("/argo/main.123.js", "https://native-argo.example/main.123.js"),
+            ("/argo/assets/logo.svg", "https://native-argo.example/assets/logo.svg"),
+        ):
+            with self.subTest(path=path):
+                response = self.fetch(path, headers=self.headers(**{"Sec-Fetch-Mode": "no-cors"}))
+                self.assertEqual(response.code, 200)
+                self.assertEqual(self.outbound[-1].url, expected)
+                self.assertEqual(dict(self.outbound[-1].headers), {})
+                self.assertEqual(self.outbound[-1].ca_certs, self.ca.name)
+                self.assertFalse(self.outbound[-1].follow_redirects)
+
     def test_native_login_reauthorizes_with_canonical_return_target(self):
         response = self.fetch("/argo/login?redirect=https://evil.example", follow_redirects=False)
         self.assertEqual(response.code, 302)
@@ -432,6 +510,100 @@ class ArgoServiceTest(AsyncHTTPTestCase):
         response = self.fetch(path, method="HEAD", headers=self.headers())
         self.assertEqual(response.code, 200)
         self.assertEqual(response.body, b"")
+
+    def test_foreign_and_missing_workflow_objects_are_indistinguishable(self):
+        paths = [
+            ("GET", "/argo/api/v1/workflows/cps-workflows/wf"),
+            ("GET", "/argo/api/v1/workflows/cps-workflows/wf/log"),
+        ] + [
+            (method, "/argo/artifact-files/cps-workflows/workflows/wf/node/" + output)
+            for method in ("GET", "HEAD")
+            for output in ("inputs/snapshot", "outputs/executed-notebook")
+        ]
+        safe_headers = ("Content-Type", "Content-Length", "Cache-Control",
+                        "X-Content-Type-Options", "Referrer-Policy", "Content-Security-Policy")
+        expected_body = None
+        for method, path in paths:
+            responses = []
+            for code in (403, 404):
+                self.compute_error_code = code
+                with self.subTest(method=method, path=path, upstream_code=code):
+                    response = self.fetch(path, method=method, headers=self.headers())
+                    responses.append(response)
+                    self.assertEqual(response.code, 404)
+                    self.assertNotIn(b"private-upstream", response.body)
+                    self.assertNotIn("private-upstream", str(response.headers))
+                    self.assertNotIn("upstream-cookie", str(response.headers))
+                    for name in ("Content-Disposition", "X-Secret", "Location",
+                                 "WWW-Authenticate", "X-Accel-Buffering"):
+                        self.assertNotIn(name, response.headers)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                    if method == "GET":
+                        if expected_body is None:
+                            expected_body = response.body
+                        self.assertEqual(response.body, expected_body)
+                    else:
+                        self.assertEqual(response.body, b"")
+            self.assertEqual(responses[0].body, responses[1].body)
+            self.assertEqual({name: responses[0].headers[name] for name in safe_headers},
+                             {name: responses[1].headers[name] for name in safe_headers})
+
+    def test_object_privacy_does_not_mask_other_downstream_failures(self):
+        object_paths = (
+            "/argo/api/v1/workflows/cps-workflows/wf",
+            "/argo/api/v1/workflows/cps-workflows/wf/log",
+            "/argo/artifact-files/cps-workflows/workflows/wf/node/outputs/executed-notebook",
+        )
+        for code in (401, 429):
+            self.compute_error_code = code
+            for path in object_paths:
+                with self.subTest(path=path, upstream_code=code):
+                    self.assertEqual(self.fetch(path, headers=self.headers()).code, code)
+        for code in (403, 404):
+            self.compute_error_code = code
+            for path in (
+                "/argo/api/v1/info", "/argo/api/v1/version", "/argo/api/v1/userinfo",
+                "/argo/api/v1/workflows/cps-workflows",
+                "/argo/api/v1/workflow-events/cps-workflows",
+            ):
+                with self.subTest(path=path, upstream_code=code):
+                    self.assertEqual(self.fetch(path, headers=self.headers()).code, code)
+
+    def test_stream_availability_statuses_keep_generic_body_and_drop_upstream_details(self):
+        paths = (
+            "/argo/api/v1/workflows/cps-workflows/wf/log",
+            "/argo/api/v1/workflow-events/cps-workflows",
+            "/argo/artifact-files/cps-workflows/workflows/wf/node/inputs/snapshot",
+            "/argo/artifact-files/cps-workflows/workflows/wf/node/outputs/executed-notebook",
+        )
+        # The gateway's real availability errors are JSON, not the successful
+        # artifact/SSE content types. Exercise actual socket callbacks for both.
+        for code in (503, 504):
+            self.compute_error_code = code
+            expected_body = None
+            for content_type in ("application/json", "text/event-stream", "application/octet-stream"):
+                self.compute_error_type = content_type
+                for path in paths:
+                    with self.subTest(code=code, content_type=content_type, path=path):
+                        response = self.fetch(path, headers=self.headers())
+                        self.assertEqual(response.code, code)
+                        self.assertIn(b"Compute stream unavailable", response.body)
+                        self.assertNotIn(b"private-upstream", response.body)
+                        self.assertNotIn("private-upstream", str(response.headers))
+                        self.assertNotIn("upstream-cookie", str(response.headers))
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+                        for name in ("Content-Disposition", "Location", "WWW-Authenticate",
+                                     "X-Secret", "X-Accel-Buffering"):
+                            self.assertNotIn(name, response.headers)
+                        if expected_body is None:
+                            expected_body = response.body
+                        self.assertEqual(response.body, expected_body)
+            for path in paths[2:]:
+                with self.subTest(method="HEAD", code=code, path=path):
+                    response = self.fetch(path, method="HEAD", headers=self.headers())
+                    self.assertEqual(response.code, code)
+                    self.assertEqual(response.body, b"")
 
     @gen_test
     async def test_truncated_artifact_aborts_browser_transfer(self):
