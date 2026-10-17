@@ -101,6 +101,8 @@ class WorkspaceHandler(RecordsHandler):
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
         except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
         except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
+        except (ConnectionError, httpx.RequestError):
+            raise web.HTTPError(503, reason='Shared workspace upstream service is unavailable') from None
         except httpx.HTTPStatusError as error:
             # Storage uses httpx rather than Tornado's compute client. Preserve
             # actionable conflicts without disclosing private URLs or bodies.

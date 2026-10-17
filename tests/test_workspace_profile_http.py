@@ -134,7 +134,7 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
                 self.assertEqual(self.post({'profile': 'cpu-large'}).code, status)
         self.assertEqual(self.calls, [])
 
-    def test_storage_http_conflict_preserves_stopped_lifecycle_and_safe_response(self):
+    def assert_failed_start(self, error, status, *, during_registration=False):
         from e2x_course_hub.cps.workspaces import WorkspaceService
 
         async def prepare():
@@ -157,22 +157,47 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
             register_workspace=AsyncMock(return_value={}), release_after_shutdown=AsyncMock())
         hub = SimpleNamespace(assert_stopped=AsyncMock(), start=AsyncMock(),
             sync_group=AsyncMock(), replace_shares=AsyncMock())
-        request = httpx.Request('POST', 'https://private-control.invalid/workspaces?token=secret')
-        upstream = httpx.Response(409, request=request, text='private internal diagnostic')
-        filesystem = SimpleNamespace(provision=AsyncMock(side_effect=httpx.HTTPStatusError(
-            'secret private upstream URL', request=request, response=upstream)))
+        filesystem = SimpleNamespace(provision=AsyncMock())
+        if during_registration:
+            compute.register_workspace.side_effect = error
+        else:
+            filesystem.provision.side_effect = error
         service = WorkspaceService(self.provider, compute, hub, filesystem=filesystem)
         self._app.settings['workspace_service'] = service
         response = self.post({}, action='start')
-        self.assertEqual(response.code, 409)
+        self.assertEqual(response.code, status)
         self.assertNotIn(b'private', response.body)
         self.assertNotIn(b'secret', response.body)
         workspace = self.io_loop.run_sync(lambda: service.get('w'))
         self.assertEqual(workspace['state'], 'stopped')
-        filesystem.provision.assert_awaited_once()
+        if during_registration:
+            compute.register_workspace.assert_awaited_once()
+            filesystem.provision.assert_not_awaited()
+        else:
+            filesystem.provision.assert_awaited_once()
         hub.start.assert_not_awaited()
         hub.sync_group.assert_not_awaited()
         compute.release_after_shutdown.assert_not_awaited()
+
+    def test_storage_http_conflict_preserves_stopped_lifecycle_and_safe_response(self):
+        request = httpx.Request('POST', 'https://private-control.invalid/workspaces?token=secret')
+        upstream = httpx.Response(409, request=request, text='private internal diagnostic')
+        self.assert_failed_start(httpx.HTTPStatusError('secret private upstream URL',
+            request=request, response=upstream), 409)
+
+    def test_registration_connection_refused_preserves_stopped_lifecycle(self):
+        self.assert_failed_start(ConnectionRefusedError('private upstream secret'),
+                                 503, during_registration=True)
+
+    def test_registration_httpx_connect_error_preserves_stopped_lifecycle(self):
+        request = httpx.Request('POST', 'https://private-control.invalid/?token=secret')
+        self.assert_failed_start(httpx.ConnectError('private secret', request=request),
+                                 503, during_registration=True)
+
+    def test_registration_httpx_read_timeout_preserves_stopped_lifecycle(self):
+        request = httpx.Request('POST', 'https://private-control.invalid/?token=secret')
+        self.assert_failed_start(httpx.ReadTimeout('private secret', request=request),
+                                 503, during_registration=True)
 
     def test_existing_actions_preserve_payload_and_actor_contract(self):
         self.assertEqual(self.post({}, action='start').code, 200)
