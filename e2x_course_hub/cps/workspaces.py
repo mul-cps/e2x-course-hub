@@ -37,6 +37,10 @@ def course_serialized(method=None, *, shared=False):
             return await method(self,identifier,*args,**kwargs)
     return wrapped
 
+class _WorkspaceStartCancelled(TimeoutError):
+    pass
+
+
 class HubWorkspaceAdapter:
     def __init__(self, hub_api, *, timeout=120):
         self.hub = hub_api
@@ -103,9 +107,20 @@ class HubWorkspaceAdapter:
         if usernames: await self.hub.add_users_to_group(group,usernames)
 
     async def start(self, workspace):
+        return await self._start(workspace)
+
+    async def start_cancellable(self, workspace, cancellation):
+        return await self._start(workspace, cancellation)
+
+    async def _start(self, workspace, cancellation=None):
+        def check_cancelled():
+            if cancellation is not None and cancellation.is_set():
+                raise _WorkspaceStartCancelled('Workspace start cancelled; observed shutdown required')
+
         # Only the selected fixed policy profile enters spawn; no user Pod/resource overrides.
         deadline = asyncio.get_running_loop().time() + self.timeout
         try:
+            check_cancelled()
             response = await asyncio.wait_for(self.hub.request(
                 self.path(workspace,''),'POST',json.dumps({'profile':workspace['profile']})),
                 timeout=max(0,deadline-asyncio.get_running_loop().time()))
@@ -115,16 +130,25 @@ class HubWorkspaceAdapter:
             # is checked against the authoritative server model before access
             # or a running state is published by the console.
             while True:
+                check_cancelled()
                 remaining = deadline-asyncio.get_running_loop().time()
                 if remaining <= 0: raise TimeoutError()
                 server = await asyncio.wait_for(self.server_status(workspace),timeout=remaining)
+                check_cancelled()
                 if server is None or server.get('stopped') is True:
                     raise RuntimeError('Hub spawn failed before the workspace became ready')
                 if server.get('ready') is True and server.get('pending') is None:
                     return
                 if server.get('pending') != 'spawn':
                     raise RuntimeError('Hub spawn failed: workspace is neither ready nor starting')
-                await asyncio.sleep(min(0.2,max(0,deadline-asyncio.get_running_loop().time())))
+                delay = min(0.2,max(0,deadline-asyncio.get_running_loop().time()))
+                if cancellation is None:
+                    await asyncio.sleep(delay)
+                else:
+                    try: await asyncio.wait_for(cancellation.wait(), timeout=delay)
+                    except TimeoutError: pass
+        except _WorkspaceStartCancelled:
+            raise
         except TimeoutError as error:
             raise TimeoutError('Hub readiness not confirmed; workspace start requires shutdown reconciliation') from error
 
@@ -143,6 +167,7 @@ class WorkspaceService:
             raise ValueError('Native cleanup wait must be finite and at most 120 seconds')
         self.provider, self.compute, self.hub = provider,compute,hub
         self.locks = {}
+        self._active_starts = {}
         self.course_locks = {}
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
         self.accounts = accounts
@@ -398,9 +423,15 @@ class WorkspaceService:
                 # an unknown central binding cannot prove a reservation release.
                 await self.provider.put('workspaces',{**workspace,'state':'stopped'},actor=actor)
                 raise
+            cancellation = asyncio.Event()
+            self._active_starts[identifier] = cancellation
             try:
                 await self.hub.sync_group(workspace,await self.provider.members(workspace['course_id']))
-                await self.hub.start(workspace)
+                cancellable = getattr(self.hub,'start_cancellable',None)
+                if cancellable is None:
+                    await self.hub.start(workspace)
+                else:
+                    await cancellable(workspace,cancellation)
                 await self.hub.replace_shares(workspace,workspace['group_id'])
             except Exception:
                 # A failed response can still leave a starting server; confirm shutdown first.
@@ -413,6 +444,9 @@ class WorkspaceService:
                 await self.provider.put('workspaces',{**workspace,'state':'stopped',
                     'notice':'Workspace start failed. Shutdown and reservation cleanup confirmed; retry is available.'},actor=actor)
                 raise
+            finally:
+                if self._active_starts.get(identifier) is cancellation:
+                    del self._active_starts[identifier]
             await self.provider.put('workspaces',{**workspace,'state':'running','notice':None},actor=actor)
 
     @audited_lifecycle
@@ -465,6 +499,11 @@ class WorkspaceService:
 
     @audited_lifecycle
     async def close(self, identifier, *, actor, archive=False):
+        # Signal only the generation already owning this workspace. Do not
+        # cancel its HTTP POST or bypass its serialized observed cleanup.
+        cancellation = self._active_starts.get(identifier)
+        if cancellation is not None:
+            cancellation.set()
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
             reservation = await self.compute.reservation_state(identifier)
