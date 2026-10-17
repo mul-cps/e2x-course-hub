@@ -6,6 +6,7 @@ from functools import wraps
 from contextlib import AsyncExitStack
 from urllib.parse import quote
 from tornado.httpclient import HTTPClientError
+from ..api.errors import HubAPIError
 from .compute import NativeCleanupPending
 from .course_locks import CourseOperationLock
 
@@ -64,16 +65,27 @@ class HubWorkspaceAdapter:
             raise ValueError('Stop existing server before workspace policy/access reconciliation')
 
     async def stop_confirmed(self, workspace):
-        try:
-            await self.hub.request(self.path(workspace,''), 'DELETE')
-        except HTTPClientError as error:
-            if error.code != 404: raise
         deadline = asyncio.get_running_loop().time() + self.timeout
+        try:
+            await asyncio.wait_for(self.hub.request(self.path(workspace,''), 'DELETE'),
+                                   timeout=max(0,deadline-asyncio.get_running_loop().time()))
+        except HTTPClientError as error:
+            if error.code != 404 and not 500 <= error.code <= 599: raise
+        except HubAPIError as error:
+            cause = error.__cause__
+            if not isinstance(cause,HTTPClientError) or not 500 <= cause.code <= 599: raise
+        except TimeoutError:
+            pass  # The DELETE outcome is uncertain, never evidence of absence.
         while True:
-            if await self.server_status(workspace) is None: return True
-            if asyncio.get_running_loop().time() >= deadline:
+            remaining = deadline-asyncio.get_running_loop().time()
+            if remaining <= 0:
                 raise TimeoutError('Hub shutdown not confirmed; GPU reservations retained')
-            await asyncio.sleep(0.2)
+            try:
+                server = await asyncio.wait_for(self.server_status(workspace),timeout=remaining)
+            except TimeoutError as error:
+                raise TimeoutError('Hub shutdown not confirmed; GPU reservations retained') from error
+            if server is None: return True
+            await asyncio.sleep(min(.2,max(0,deadline-asyncio.get_running_loop().time())))
 
     async def replace_shares(self, workspace, group):
         user = quote(workspace['hub_user'],safe='')

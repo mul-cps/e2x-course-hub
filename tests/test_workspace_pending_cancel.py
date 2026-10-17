@@ -103,6 +103,7 @@ class PendingCancelTests(unittest.IsolatedAsyncioTestCase):
     async def test_unconfirmed_shutdown_retains_capacity_and_unresolved_state(self):
         start = await self.start_pending()
         self.fail_delete = True
+        self.hub.timeout = .02
         self.delete_allowed.set()
         stop = self.task(self.service.close('w', actor='instructor'))
         results = await asyncio.wait_for(asyncio.gather(start, stop, return_exceptions=True), 1)
