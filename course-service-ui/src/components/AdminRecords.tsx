@@ -11,11 +11,18 @@ import {
   FolderOpen,
   Cpu,
 } from "lucide-react";
-import { requests } from "../api/client";
+import { requests, type ApiError } from "../api/client";
 import { config } from "../config";
 import PlatformStatusPanel from "./PlatformStatusPanel";
 import { useReadonlyRefresh } from "../hooks/useReadonlyRefresh";
 
+type WorkspaceOperation = {
+  workspace: string;
+  startPending: boolean;
+  stopPending: boolean;
+  cancelRequested: boolean;
+  stopped: boolean;
+};
 type Row = Record<string, unknown>;
 type Field = {
   key: string;
@@ -223,6 +230,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const workspaceOperationRef = useRef<WorkspaceOperation | null>(null);
+  const [workspaceOperation, setWorkspaceOperation] =
+    useState<WorkspaceOperation | null>(null);
   const [sort, setSort] = useState<{ key: string; ascending: boolean } | null>(
     null,
   );
@@ -640,6 +650,67 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  }
+  async function workspaceAction(workspace: string, action: "start" | "stop") {
+    let operation = workspaceOperationRef.current;
+    if (operation) {
+      if (
+        action !== "stop" ||
+        operation.workspace !== workspace ||
+        !operation.startPending ||
+        operation.stopPending ||
+        operation.stopped
+      )
+        return;
+      operation.stopPending = true;
+      operation.cancelRequested = true;
+    } else {
+      if (busy) return;
+      operation = {
+        workspace,
+        startPending: action === "start",
+        stopPending: action === "stop",
+        cancelRequested: false,
+        stopped: false,
+      };
+      workspaceOperationRef.current = operation;
+      setError("");
+      setNotice("");
+    }
+    setWorkspaceOperation({ ...operation });
+    setBusy(true);
+    // A pending Start must leave the table reachable for its own Stop.
+    if (action === "start" || operation.cancelRequested) setConfirmation(null);
+    try {
+      await requests.post(
+        `${config.apiUrl}/workspaces/${encodeURIComponent(workspace)}/${action}`,
+        {},
+      );
+      if (action === "stop") operation.stopped = true;
+      setConfirmation(null);
+      await refresh();
+      if (operation.stopped) setNotice("Workspace stopped.");
+      else if (!operation.cancelRequested)
+        setNotice(`Workspace ${action} requested.`);
+    } catch (e) {
+      const cancelled =
+        action === "start" &&
+        operation.cancelRequested &&
+        (e as ApiError).response?.status === 409 &&
+        e instanceof Error &&
+        e.message === "Workspace start cancelled; observed shutdown required";
+      if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      await refresh();
+    } finally {
+      if (action === "start") operation.startPending = false;
+      else operation.stopPending = false;
+      // Both requests and their readbacks own busy until they have finished.
+      if (!operation.startPending && !operation.stopPending) {
+        workspaceOperationRef.current = null;
+        setWorkspaceOperation(null);
+        setBusy(false);
+      } else setWorkspaceOperation({ ...operation });
     }
   }
   function open(record?: Row) {
@@ -1209,21 +1280,35 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                             {["start", "stop"].map((action) => (
                               <button
                                 key={action}
-                                disabled={busy}
-                                onClick={() =>
-                                  ask(
-                                    `${action === "stop" ? "Stop this workspace? Its active kernel will be interrupted; files are preserved." : "Start this workspace? All member reservations must be available."}`,
-                                    () =>
-                                      mutate(
-                                        () =>
-                                          requests.post(
-                                            `${config.apiUrl}/workspaces/${encodeURIComponent(String(r.id))}/${action}`,
-                                            {},
-                                          ),
-                                        `Workspace ${action} requested.`,
-                                      ),
+                                disabled={
+                                  busy &&
+                                  !(
+                                    action === "stop" &&
+                                    workspaceOperation?.workspace ===
+                                      String(r.id) &&
+                                    workspaceOperation.startPending &&
+                                    !workspaceOperation.stopPending &&
+                                    !workspaceOperation.stopped
                                   )
                                 }
+                                onClick={() => {
+                                  if (
+                                    action === "stop" &&
+                                    workspaceOperation?.workspace ===
+                                      String(r.id) &&
+                                    workspaceOperation.startPending
+                                  ) {
+                                    void workspaceAction(String(r.id), "stop");
+                                  } else
+                                    ask(
+                                      `${action === "stop" ? "Stop this workspace? Its active kernel will be interrupted; files are preserved." : "Start this workspace? All member reservations must be available."}`,
+                                      () =>
+                                        workspaceAction(
+                                          String(r.id),
+                                          action as "start" | "stop",
+                                        ),
+                                    );
+                                }}
                               >
                                 {action === "start" ? "Start" : "Stop"}
                               </button>
