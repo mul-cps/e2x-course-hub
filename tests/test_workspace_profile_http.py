@@ -76,6 +76,19 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
                           body=json.dumps(body),
                           headers={'X-Test-User': user} if user else {})
 
+    def test_intentional_start_cancellation_returns_exact_json_detail(self):
+        from e2x_course_hub.cps.workspaces import _WorkspaceStartCancelled
+        async def cancelled(identifier, *, actor):
+            self.assertEqual((identifier, actor), ('w', 'alice'))
+            raise _WorkspaceStartCancelled('Workspace start cancelled; observed shutdown required')
+        self._app.settings['workspace_service'].start = cancelled
+        response = self.post({}, action='start')
+        self.assertEqual(response.code, 409)
+        self.assertTrue(response.headers['Content-Type'].startswith('application/json'))
+        self.assertEqual(json.loads(response.body), {
+            'detail': 'Workspace start cancelled; observed shutdown required',
+        })
+
     def test_owned_course_changes_profile_with_authenticated_human_actor(self):
         response = self.post({'profile': 'cpu-large'})
         self.assertEqual(response.code, 200)

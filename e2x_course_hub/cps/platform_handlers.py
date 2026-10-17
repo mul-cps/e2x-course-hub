@@ -8,6 +8,7 @@ from tornado.httpclient import HTTPClientError
 from .handlers import RecordsHandler
 from .assignments import allocate
 from .platform_status import default_handlers as status_handlers
+from .workspaces import _WorkspaceStartCancelled
 
 class ComputeHandler(RecordsHandler):
     @web.authenticated
@@ -99,6 +100,10 @@ class WorkspaceHandler(RecordsHandler):
             else: await service.remove_member(identifier,data['membership_id'],actor=actor)
         except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
+        except _WorkspaceStartCancelled as error:
+            self.set_status(409)
+            self.write({'detail':str(error)})
+            return
         except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
         except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
         except (ConnectionError, httpx.RequestError):
