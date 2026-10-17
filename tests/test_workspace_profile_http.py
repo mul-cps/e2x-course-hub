@@ -3,6 +3,9 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
 
 from tornado import web
 from tornado.httpclient import HTTPClientError
@@ -119,11 +122,57 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
         for error, status in ((PermissionError('read only'), 403),
                               (TimeoutError('pending'), 409),
                               (RuntimeError('unavailable'), 503),
-                              (HTTPClientError(403), 403)):
+                              (HTTPClientError(403), 403),
+                              (httpx.HTTPStatusError('private upstream detail',
+                                  request=httpx.Request('POST', 'https://private.invalid'),
+                                  response=httpx.Response(403)), 403),
+                              (httpx.HTTPStatusError('private upstream detail',
+                                  request=httpx.Request('POST', 'https://private.invalid'),
+                                  response=httpx.Response(503)), 502)):
             with self.subTest(error=error):
                 self.failure = error
                 self.assertEqual(self.post({'profile': 'cpu-large'}).code, status)
         self.assertEqual(self.calls, [])
+
+    def test_storage_http_conflict_preserves_stopped_lifecycle_and_safe_response(self):
+        from e2x_course_hub.cps.workspaces import WorkspaceService
+
+        async def prepare():
+            await self.provider.put('courses', {'id': 'c', 'resource_ceiling': {},
+                'workspace_bindings': [{'group_id': 'g', 'hub_user': 'neutral',
+                    'hub_server': 'rtc', 'namespace': 'trusted', 'pod': 'preserved'}]}, actor='admin')
+            await self.provider.put('groups', {'id': 'g', 'course_id': 'c'}, actor='admin')
+            person = '00000000-0000-4000-8000-000000000001'
+            await self.provider.link_identities([{'hub': 'cps', 'username': 'student',
+                'email': 'student@example.edu', 'person_id': person,
+                'administrator_reviewed': True, 'verified': True}], actor='admin')
+            await self.provider.put('memberships', {'id': 'm', 'course_id': 'c',
+                'group_id': 'g', 'person_id': 'student', 'canonical_person_id': person}, actor='admin')
+            await self.provider.put('workspaces', {'id': 'w', 'course_id': 'c',
+                'group_id': 'g', 'profile': 'shared-5', 'hub_user': 'neutral',
+                'hub_server': 'rtc', 'state': 'stopped'}, actor='admin')
+
+        self.io_loop.run_sync(prepare)
+        compute = SimpleNamespace(validate_workspace=AsyncMock(return_value={'policy_hash': 'current'}),
+            register_workspace=AsyncMock(return_value={}), release_after_shutdown=AsyncMock())
+        hub = SimpleNamespace(assert_stopped=AsyncMock(), start=AsyncMock(),
+            sync_group=AsyncMock(), replace_shares=AsyncMock())
+        request = httpx.Request('POST', 'https://private-control.invalid/workspaces?token=secret')
+        upstream = httpx.Response(409, request=request, text='private internal diagnostic')
+        filesystem = SimpleNamespace(provision=AsyncMock(side_effect=httpx.HTTPStatusError(
+            'secret private upstream URL', request=request, response=upstream)))
+        service = WorkspaceService(self.provider, compute, hub, filesystem=filesystem)
+        self._app.settings['workspace_service'] = service
+        response = self.post({}, action='start')
+        self.assertEqual(response.code, 409)
+        self.assertNotIn(b'private', response.body)
+        self.assertNotIn(b'secret', response.body)
+        workspace = self.io_loop.run_sync(lambda: service.get('w'))
+        self.assertEqual(workspace['state'], 'stopped')
+        filesystem.provision.assert_awaited_once()
+        hub.start.assert_not_awaited()
+        hub.sync_group.assert_not_awaited()
+        compute.release_after_shutdown.assert_not_awaited()
 
     def test_existing_actions_preserve_payload_and_actor_contract(self):
         self.assertEqual(self.post({}, action='start').code, 200)

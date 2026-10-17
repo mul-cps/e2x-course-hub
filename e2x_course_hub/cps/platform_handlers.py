@@ -1,5 +1,6 @@
 """Authenticated console operations. Central policy remains the resource authority."""
 import sqlite3
+import httpx
 import json
 from urllib.parse import urlencode
 from tornado import web
@@ -100,6 +101,12 @@ class WorkspaceHandler(RecordsHandler):
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
         except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
         except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
+        except httpx.HTTPStatusError as error:
+            # Storage uses httpx rather than Tornado's compute client. Preserve
+            # actionable conflicts without disclosing private URLs or bodies.
+            status = error.response.status_code
+            raise web.HTTPError(status if 400 <= status < 500 else 502,
+                                reason='Shared workspace operation rejected by upstream service') from None
         except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
         self.write({'workspace':await service.get(identifier)})
 
