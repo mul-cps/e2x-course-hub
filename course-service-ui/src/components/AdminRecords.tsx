@@ -1224,40 +1224,28 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     ))}
                     <td>
                       <div className="row-actions">
-                        {kind !== "audit" && (
-                          <details>
-                            <summary>Details</summary>
-                            <dl>
-                              {Object.entries(r)
-                                .filter(([key]) => !columns.includes(key))
-                                .map(([key, value]) => (
-                                  <div key={key}>
-                                    <dt>
-                                      {key
-                                        .replaceAll("_", " ")
-                                        .replace(/^./, (c) => c.toUpperCase())}
-                                    </dt>
-                                    <dd>{display(value)}</dd>
-                                  </div>
-                                ))}
-                            </dl>
-                          </details>
-                        )}
-                        {kind === "audit" ? (
-                          <details>
-                            <summary>Details</summary>
-                            <dl>
-                              {Object.entries(r)
-                                .filter(([k]) => !columns.includes(k))
-                                .map(([k, v]) => (
-                                  <div key={k}>
-                                    <dt>{k}</dt>
-                                    <dd>{display(v)}</dd>
-                                  </div>
-                                ))}
-                            </dl>
-                          </details>
-                        ) : kind === "workspaces" ? (
+                        <details>
+                          <summary>Details</summary>
+                          <dl>
+                            {Object.entries(r)
+                              .filter(([key]) => !columns.includes(key))
+                              .map(([key, value]) => (
+                                <div key={key}>
+                                  <dt>
+                                    {kind === "audit"
+                                      ? key
+                                      : key
+                                          .replaceAll("_", " ")
+                                          .replace(/^./, (c) =>
+                                            c.toUpperCase(),
+                                          )}
+                                  </dt>
+                                  <dd>{display(value)}</dd>
+                                </div>
+                              ))}
+                          </dl>
+                        </details>
+                        {kind === "audit" ? null : kind === "workspaces" ? (
                           <>
                             <button
                               aria-label={`View workspace profile ${display(r.id)}`}
