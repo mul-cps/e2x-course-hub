@@ -8,26 +8,12 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { InfoField } from "./common/InfoField";
 import { Badge } from "@/components/ui/badge";
 
 export interface CourseDetailCardProps {
   courseDetails: CourseDetails;
 }
-
-interface InfoFieldProps {
-  label: string;
-  value: string;
-  className?: string;
-}
-
-const InfoField: React.FC<InfoFieldProps> = ({ label, value, className }) => (
-  <div className={cn("flex flex-col gap-1", className)}>
-    <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-      {label}
-    </span>
-    <span className="text-foreground text-base">{value}</span>
-  </div>
-);
 
 export const CourseDetailCard: React.FC<CourseDetailCardProps> = ({
   courseDetails,

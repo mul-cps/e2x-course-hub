@@ -1,3 +1,4 @@
+import { InfoField } from "./common/InfoField";
 import type { Profile } from "../types";
 import { Card, CardContent, CardHeader } from "./ui/card";
 import {
@@ -21,12 +22,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({ profile }) => {
       </CardHeader>
 
       <CardContent className="space-y-4">
-        <div className="flex flex-col gap-1">
-          <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-            Profile Name:
-          </span>
-          <span className="text-foreground text-base">{profile.name}</span>
-        </div>
+        <InfoField label="Profile Name:" value={profile.name} />
 
         <Accordion type="single" collapsible className="w-full">
           <AccordionItem value="runtime">
@@ -40,30 +36,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({ profile }) => {
                     Image
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        Name:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.image.name}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        Tag:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.image.tag}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        Pull Policy:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.image.pullPolicy}
-                      </span>
-                    </div>
+                    <InfoField
+                      label="Name:"
+                      value={profile.runtime.image.name}
+                    />
+                    <InfoField label="Tag:" value={profile.runtime.image.tag} />
+                    <InfoField
+                      label="Pull Policy:"
+                      value={profile.runtime.image.pullPolicy}
+                    />
                   </div>
                 </div>
 
@@ -72,38 +53,22 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({ profile }) => {
                     Resources
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        CPU Guarantee:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.resources.cpu_guarantee}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        CPU Limit:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.resources.cpu_limit}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        Memory Guarantee:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.resources.mem_guarantee}
-                      </span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="font-semibold text-muted-foreground text-xs uppercase tracking-wide">
-                        Memory Limit:
-                      </span>
-                      <span className="text-foreground text-base">
-                        {profile.runtime.resources.mem_limit}
-                      </span>
-                    </div>
+                    <InfoField
+                      label="CPU Guarantee:"
+                      value={profile.runtime.resources.cpu_guarantee}
+                    />
+                    <InfoField
+                      label="CPU Limit:"
+                      value={profile.runtime.resources.cpu_limit}
+                    />
+                    <InfoField
+                      label="Memory Guarantee:"
+                      value={profile.runtime.resources.mem_guarantee}
+                    />
+                    <InfoField
+                      label="Memory Limit:"
+                      value={profile.runtime.resources.mem_limit}
+                    />
                   </div>
                 </div>
               </div>
