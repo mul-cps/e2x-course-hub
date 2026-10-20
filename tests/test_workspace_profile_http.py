@@ -89,6 +89,70 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
             'detail': 'Workspace start cancelled; observed shutdown required',
         })
 
+    def failure_response(self, error, *, action='start'):
+        async def fail(*args, **kwargs):
+            raise error
+        method = {'start': 'start', 'stop': 'close', 'profile': 'change_profile',
+                  'remove-member': 'remove_member'}[action]
+        setattr(self._app.settings['workspace_service'], method, fail)
+        body = {'profile': 'cpu-large'} if action == 'profile' else (
+            {'membership_id': 'm'} if action == 'remove-member' else {})
+        return self.post(body, action=action)
+
+    def test_upstream_conflicts_do_not_claim_entitlement_denial(self):
+        for action in ('start', 'stop', 'profile', 'remove-member'):
+            with self.subTest(action=action):
+                response = self.failure_response(HTTPClientError(409,
+                    'private claim token=secret'), action=action)
+                self.assertEqual(response.code, 409)
+                detail = json.loads(response.body)['detail']
+                self.assertIn('could not complete', detail)
+                self.assertNotIn('policy', detail.lower())
+                self.assertNotIn('secret', detail)
+                self.assertNotIn('private', detail)
+
+    def test_upstream_authentication_and_authorization_statuses_are_preserved(self):
+        from e2x_course_hub.api.errors import HubAPIError
+        for status in (401, 403):
+            for wrapped in (False, True):
+                with self.subTest(status=status, wrapped=wrapped):
+                    error = HTTPClientError(status, 'private token=secret')
+                    if wrapped:
+                        original = error
+                        error = HubAPIError('private token=secret')
+                        error.__cause__ = original
+                    response = self.failure_response(error)
+                    self.assertEqual(response.code, status)
+                    detail = json.loads(response.body)['detail']
+                    self.assertNotIn('secret', detail)
+                    self.assertNotIn('private', detail)
+
+    def test_wrapped_hub_failure_and_timeout_are_sanitized_json(self):
+        from e2x_course_hub.api.errors import HubAPIError
+        wrapped = HubAPIError('private https://hub.invalid?token=secret')
+        wrapped.__cause__ = HTTPClientError(500, 'private token=secret')
+        for error, status in ((wrapped, 500),
+                              (HubAPIError('private secret'), 502),
+                              (TimeoutError('private token=secret'), 409)):
+            with self.subTest(error=type(error).__name__):
+                response = self.failure_response(error)
+                self.assertEqual(response.code, status)
+                detail = json.loads(response.body)['detail']
+                self.assertIn('workspace', detail.lower())
+                self.assertNotIn('secret', detail)
+                self.assertNotIn('private', detail)
+
+    def test_native_cleanup_pending_requires_wait_not_start_retry(self):
+        from e2x_course_hub.cps.compute import NativeCleanupPending
+        response = self.failure_response(NativeCleanupPending('private-workspace', 'secret-attempt'))
+        self.assertEqual(response.code, 409)
+        detail = json.loads(response.body)['detail']
+        self.assertIn('cleanup is pending', detail)
+        self.assertIn('Wait', detail)
+        self.assertNotIn('retry', detail.lower())
+        self.assertNotIn('private', detail)
+        self.assertNotIn('secret', detail)
+
     def test_owned_course_changes_profile_with_authenticated_human_actor(self):
         response = self.post({'profile': 'cpu-large'})
         self.assertEqual(response.code, 200)
@@ -147,7 +211,8 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
                 self.assertEqual(self.post({'profile': 'cpu-large'}).code, status)
         self.assertEqual(self.calls, [])
 
-    def assert_failed_start(self, error, status, *, during_registration=False):
+    def assert_failed_start(self, error, status, *, during_registration=False, during_spawn=False,
+                            cleanup_error=None):
         from e2x_course_hub.cps.workspaces import WorkspaceService
 
         async def prepare():
@@ -167,12 +232,16 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
 
         self.io_loop.run_sync(prepare)
         compute = SimpleNamespace(validate_workspace=AsyncMock(return_value={'policy_hash': 'current'}),
-            register_workspace=AsyncMock(return_value={}), release_after_shutdown=AsyncMock())
+            register_workspace=AsyncMock(return_value={}), release_after_shutdown=AsyncMock(),
+            reservation_state=AsyncMock(return_value={'active': True, 'attempt': 'secret-attempt'}))
         hub = SimpleNamespace(assert_stopped=AsyncMock(), start=AsyncMock(),
-            sync_group=AsyncMock(), replace_shares=AsyncMock())
+            sync_group=AsyncMock(), replace_shares=AsyncMock(), stop_confirmed=AsyncMock())
         filesystem = SimpleNamespace(provision=AsyncMock())
         if during_registration:
             compute.register_workspace.side_effect = error
+        elif during_spawn:
+            hub.start.side_effect = error
+            compute.release_after_shutdown.side_effect = cleanup_error
         else:
             filesystem.provision.side_effect = error
         service = WorkspaceService(self.provider, compute, hub, filesystem=filesystem)
@@ -182,6 +251,13 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
         self.assertNotIn(b'private', response.body)
         self.assertNotIn(b'secret', response.body)
         workspace = self.io_loop.run_sync(lambda: service.get('w'))
+        if during_spawn:
+            self.assertEqual(workspace['state'], 'reconciling' if cleanup_error else 'stopped')
+            hub.start.assert_awaited_once()
+            hub.stop_confirmed.assert_awaited_once()
+            compute.release_after_shutdown.assert_awaited_once()
+            hub.replace_shares.assert_not_awaited()
+            return response
         self.assertEqual(workspace['state'], 'stopped')
         if during_registration:
             compute.register_workspace.assert_awaited_once()
@@ -191,6 +267,18 @@ class WorkspaceProfileHTTPTest(AsyncHTTPTestCase):
         hub.start.assert_not_awaited()
         hub.sync_group.assert_not_awaited()
         compute.release_after_shutdown.assert_not_awaited()
+
+    def test_real_failed_start_cleanup_conflict_does_not_become_policy_denial(self):
+        response = self.assert_failed_start(TimeoutError('private placement secret'), 409,
+            during_spawn=True, cleanup_error=HTTPClientError(409, 'private cleanup secret'))
+        self.assertIn('could not complete', json.loads(response.body)['detail'])
+        self.assertNotIn('policy', response.body.decode().lower())
+
+    def test_real_failed_start_scoped_cleanup_pending_retains_reconciling(self):
+        from e2x_course_hub.cps.compute import NativeCleanupPending
+        response = self.assert_failed_start(TimeoutError('private placement secret'), 409,
+            during_spawn=True, cleanup_error=NativeCleanupPending('w', 'secret-attempt'))
+        self.assertIn('cleanup is pending', json.loads(response.body)['detail'])
 
     def test_storage_http_conflict_preserves_stopped_lifecycle_and_safe_response(self):
         request = httpx.Request('POST', 'https://private-control.invalid/workspaces?token=secret')
