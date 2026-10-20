@@ -5,7 +5,7 @@ from jinja2 import Environment, FileSystemLoader
 from jupyterhub.services.auth import HubOAuth, HubOAuthCallbackHandler
 from jupyterhub.utils import url_path_join as ujoin
 from tornado import web
-from traitlets import Bool, Dict, Integer, List, Unicode
+from traitlets import Bool, Dict, Integer, List, Unicode, default, validate, TraitError
 from traitlets.config import Application
 
 from ..api.api import API
@@ -100,6 +100,24 @@ class CourseServiceApp(Application):
     compute_gateway_url = Unicode("", help="HTTPS public compute gateway for visitor token bridge").tag(config=True)
     compute_policy_url = Unicode('', help='Private HTTPS shared policy API').tag(config=True)
     compute_policy_token = Unicode('', help='Private console-specific service token').tag(config=True)
+    workspace_start_timeout = Integer(300, min=1, max=300, help=(
+        'Shared workspace Start budget in whole seconds (1..300), including preparation and Shares; '
+        'Stop remains independently bounded at 120 seconds. Defaults to '
+        'E2X_WORKSPACE_START_TIMEOUT_SECONDS or 300.')).tag(config=True)
+
+    @default('workspace_start_timeout')
+    def _workspace_start_timeout_default(self):
+        try:
+            return int(os.environ.get('E2X_WORKSPACE_START_TIMEOUT_SECONDS', '300'))
+        except ValueError:
+            raise TraitError('E2X_WORKSPACE_START_TIMEOUT_SECONDS must be integer seconds from 1 to 300') from None
+
+    @validate('workspace_start_timeout')
+    def _workspace_start_timeout_valid(self, proposal):
+        if type(proposal['value']) is not int or not 1 <= proposal['value'] <= 300:
+            raise TraitError('Workspace start budget must be integer seconds from 1 to 300')
+        return proposal['value']
+
     oauth_pkce = Bool(False, help="Enable S256 PKCE when qualified against the Hub OAuth endpoint").tag(config=True)
     console_owner = Unicode('cps', help='Console record owner: cps or cit').tag(config=True)
     database_path = Unicode('courses.sqlite', help='Persistent local SQLite database').tag(config=True)
@@ -138,8 +156,10 @@ class CourseServiceApp(Application):
                 filesystem = import_item(self.filesystem_adapter_class)()
             accounts = WorkspaceAccountAdapter(provider, hub_api, group=self.neutral_workspace_group,
                                                role=self.neutral_workspace_role, compute=compute)
-            workspace_service = WorkspaceService(provider, compute, HubWorkspaceAdapter(hub_api),
-                                                 filesystem=filesystem, accounts=accounts)
+            workspace_service = WorkspaceService(provider, compute,
+                                                 HubWorkspaceAdapter(hub_api, start_timeout=self.workspace_start_timeout),
+                                                 filesystem=filesystem, accounts=accounts,
+                                                 start_timeout=self.workspace_start_timeout)
         jinja_env = Environment(loader=FileSystemLoader(self.template_path))
         settings = {
             "api": api,

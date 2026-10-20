@@ -43,9 +43,13 @@ class _WorkspaceStartCancelled(TimeoutError):
 
 
 class HubWorkspaceAdapter:
-    def __init__(self, hub_api, *, timeout=120):
+    def __init__(self, hub_api, *, timeout=120, start_timeout=None):
+        if start_timeout is not None and (type(start_timeout) not in (int, float)
+                or not math.isfinite(start_timeout) or not 0 < start_timeout <= 300):
+            raise ValueError('Workspace start wait must be finite and at most 300 seconds')
         self.hub = hub_api
         self.timeout = timeout
+        self.start_timeout = timeout if start_timeout is None else start_timeout
 
     def path(self, workspace, suffix):
         user = quote(workspace['hub_user'],safe='')
@@ -130,7 +134,7 @@ class HubWorkspaceAdapter:
                 raise _WorkspaceStartCancelled('Workspace start cancelled; observed shutdown required')
 
         # Only the selected fixed policy profile enters spawn; no user Pod/resource overrides.
-        deadline = asyncio.get_running_loop().time() + self.timeout
+        deadline = asyncio.get_running_loop().time() + self.start_timeout
         try:
             check_cancelled()
             response = await asyncio.wait_for(self.hub.request(
@@ -173,10 +177,14 @@ class UnconfiguredFilesystemAdapter:
 
 
 class WorkspaceService:
-    def __init__(self, provider, compute, hub, *, filesystem=None, accounts=None, native_cleanup_timeout=60):
+    def __init__(self, provider, compute, hub, *, filesystem=None, accounts=None, native_cleanup_timeout=60,
+                 start_timeout=300):
         if (type(native_cleanup_timeout) not in (int, float)
                 or not math.isfinite(native_cleanup_timeout) or not 0 < native_cleanup_timeout <= 120):
             raise ValueError('Native cleanup wait must be finite and at most 120 seconds')
+        if (type(start_timeout) not in (int, float)
+                or not math.isfinite(start_timeout) or not 0 < start_timeout <= 300):
+            raise ValueError('Workspace start budget must be finite and at most 300 seconds')
         self.provider, self.compute, self.hub = provider,compute,hub
         self.locks = {}
         self._active_starts = {}
@@ -184,6 +192,7 @@ class WorkspaceService:
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
         self.accounts = accounts
         self.native_cleanup_timeout = native_cleanup_timeout
+        self.start_timeout = start_timeout
 
     async def get(self, identifier):
         for record in await self.provider.list('workspaces'):
@@ -378,11 +387,22 @@ class WorkspaceService:
             return await self.provider.put('workspaces',proposed,actor=actor)
 
     @audited_lifecycle
-    @course_serialized(shared=True)
     async def start(self, identifier, *, actor):
+        deadline = asyncio.get_running_loop().time() + self.start_timeout
+        return await self._start(identifier, actor=actor, deadline=deadline)
+
+    @course_serialized(shared=True)
+    async def _start(self, identifier, *, actor, deadline):
+        def remaining():
+            seconds = deadline - asyncio.get_running_loop().time()
+            if seconds <= 0:
+                raise TimeoutError('Workspace start budget exhausted; shutdown reconciliation required')
+            return seconds
+
         # A shared course lease spans spawn, access publication and failure cleanup.
         # HTTP authorization still happens in the existing handler before this lease.
         async with self.locks.setdefault(identifier,asyncio.Lock()):
+            remaining()
             workspace = await self.get(identifier)
             expected_lifecycle = self.provider.lifecycle_snapshot(
                 workspace['course_id'], workspace_id=identifier)
@@ -440,11 +460,14 @@ class WorkspaceService:
             try:
                 await self.hub.sync_group(workspace,await self.provider.members(workspace['course_id']))
                 cancellable = getattr(self.hub,'start_cancellable',None)
+                seconds = remaining()
                 if cancellable is None:
-                    await self.hub.start(workspace)
+                    await asyncio.wait_for(self.hub.start(workspace), timeout=seconds)
                 else:
-                    await cancellable(workspace,cancellation)
-                await self.hub.replace_shares(workspace,workspace['group_id'])
+                    await asyncio.wait_for(cancellable(workspace,cancellation), timeout=seconds)
+                await asyncio.wait_for(self.hub.replace_shares(workspace,workspace['group_id']),
+                                       timeout=remaining())
+                remaining()
             except Exception:
                 # A failed response can still leave a starting server; confirm shutdown first.
                 failed = {**workspace,'state':'reconciling',
