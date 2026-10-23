@@ -2,6 +2,7 @@
 import asyncio
 import json
 import math
+import logging
 from functools import wraps
 from contextlib import AsyncExitStack
 from urllib.parse import quote
@@ -198,6 +199,51 @@ class WorkspaceService:
         for record in await self.provider.list('workspaces'):
             if record['id'] == identifier: return record
         raise KeyError(identifier)
+
+    @audited_lifecycle
+    @course_serialized
+    async def reconcile_stopped(self, identifier, *, actor):
+        """Converge a running Source record after an independently confirmed Hub stop."""
+        async with self.locks.setdefault(identifier,asyncio.Lock()):
+            workspace=await self.get(identifier)
+            if (workspace.get('state')!='running' or workspace.get('archive_pending')
+                    or workspace.get('archived')):
+                return
+            expected=self.provider.lifecycle_snapshot(workspace['course_id'],workspace_id=identifier)
+            if await self.hub.server_status(workspace) is not None:
+                return
+
+            async def released():
+                state=await self.compute.reservation_state(identifier)
+                return (isinstance(state,dict) and set(state)=={'workspace','active','attempt'}
+                        and state.get('workspace')==identifier
+                        and state.get('active') is False and state.get('attempt') is None)
+
+            if not await released():
+                return
+            # Reuse the normal endpoint's fresh Hub/Pod/native cleanup checks.
+            # Neither lease age nor the console's stored status releases capacity.
+            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,
+                                                       actor=actor,attempt=None)
+            await self.hub.assert_stopped(workspace)
+            if not await released():
+                return
+            await self.provider.put('workspaces',{**workspace,'state':'stopped',
+                'notice':'Hub session ended; shutdown and reservation cleanup confirmed. Files retained.'},
+                actor=actor,expected_lifecycle=expected)
+
+    async def reconcile_running(self):
+        for workspace in await self.provider.list('workspaces'):
+            if workspace.get('state')!='running':
+                continue
+            lock=self.locks.get(workspace['id'])
+            if lock is not None and lock.locked():
+                continue
+            try:
+                await asyncio.wait_for(self.reconcile_stopped(workspace['id'],
+                    actor='system:hub-lifecycle'),timeout=10)
+            except Exception:
+                logging.getLogger(__name__).warning('Workspace lifecycle observation unavailable: %s',workspace['id'])
 
     async def _ensure_account(self, workspace, *, actor):
         if self.accounts is None:
