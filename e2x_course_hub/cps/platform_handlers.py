@@ -9,6 +9,8 @@ from .handlers import RecordsHandler
 from .assignments import allocate
 from .platform_status import default_handlers as status_handlers
 from .workspaces import _WorkspaceStartCancelled
+from .compute import NativeCleanupPending
+from ..api.errors import HubAPIError
 
 class ComputeHandler(RecordsHandler):
     @web.authenticated
@@ -82,6 +84,24 @@ class WorkspaceAccountAdoptionHandler(RecordsHandler):
 
 
 class WorkspaceHandler(RecordsHandler):
+    def upstream_failure(self, status, action):
+        # An upstream conflict alone proves neither an entitlement denial nor
+        # a placement timeout. Never relay private upstream messages or bodies.
+        status = status if type(status) is int and 400 <= status <= 599 else 502
+        if status == 599:
+            status = 503  # Tornado's transport failure is not an HTTP response.
+        operation = {'start': 'start', 'stop': 'shutdown', 'profile': 'profile change',
+                     'remove-member': 'membership update'}[action]
+        if status == 401:
+            detail = 'Shared workspace upstream authentication failed'
+        elif status == 403:
+            detail = 'Shared workspace operation is not authorized by the upstream service'
+        else:
+            detail = (f'Shared workspace {operation} could not complete. '
+                      'Check workspace status and reconcile it before another operation.')
+        self.set_status(status)
+        self.write({'detail': detail})
+
     @web.authenticated
     async def post(self, identifier, action):
         service = self.settings.get('workspace_service')
@@ -104,7 +124,9 @@ class WorkspaceHandler(RecordsHandler):
             self.set_status(409)
             self.write({'detail':str(error)})
             return
-        except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
+        except TimeoutError:
+            self.upstream_failure(409, action)
+            return
         except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
         except (ConnectionError, httpx.RequestError):
             raise web.HTTPError(503, reason='Shared workspace upstream service is unavailable') from None
@@ -114,7 +136,18 @@ class WorkspaceHandler(RecordsHandler):
             status = error.response.status_code
             raise web.HTTPError(status if 400 <= status < 500 else 502,
                                 reason='Shared workspace operation rejected by upstream service') from None
-        except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
+        except NativeCleanupPending:
+            self.set_status(409)
+            self.write({'detail': 'Native GPU cleanup is pending; reservations remain retained. '
+                        'Wait for confirmed cleanup before another operation.'})
+            return
+        except HTTPClientError as error:
+            self.upstream_failure(error.code, action)
+            return
+        except HubAPIError as error:
+            cause = error.__cause__
+            self.upstream_failure(cause.code if isinstance(cause, HTTPClientError) else 502, action)
+            return
         self.write({'workspace':await service.get(identifier)})
 
 class NativeGroupApprovalHandler(RecordsHandler):
