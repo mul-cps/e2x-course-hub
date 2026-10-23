@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from e2x_course_hub.cps.workspaces import HubWorkspaceAdapter, WorkspaceService
+from e2x_course_hub.cps.workspaces import HubWorkspaceAdapter, WorkspaceService, _WorkspaceStartCancelled
 import test_workspace_native_prepare as preparation
 
 
@@ -169,6 +169,42 @@ class StartBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.now, self.begin)
         self.assertEqual((await self.service.get('w'))['state'], 'stopped')
         self.assertEqual((self.posts, self.deletes), (1, 1))
+
+
+    async def test_hub_ready_without_gpu_reservation_cannot_publish_running(self):
+        self.ready_after=0
+        validate=self.compute.validate_workspace
+        async def gpu_validation(*args,**kwargs):
+            return {**await validate(*args,**kwargs),'selected_gpu_memory_gib':5}
+        self.compute.validate_workspace=gpu_validation
+        with self.assertRaisesRegex(RuntimeError,'GPU reservation ended'):
+            await self.service.start('w',actor='instructor')
+        self.assertEqual((await self.service.get('w'))['state'],'stopped')
+        self.assertEqual(self.deletes,1)
+        self.assertIn('cleanup',self.calls)
+
+    async def test_hub_ready_with_current_gpu_reservation_can_publish_running(self):
+        self.ready_after=0
+        validate=self.compute.validate_workspace
+        async def gpu_validation(*args,**kwargs):
+            return {**await validate(*args,**kwargs),'selected_gpu_memory_gib':5}
+        self.compute.validate_workspace=gpu_validation
+        async def reservation(identifier):return {'workspace':identifier,'active':True,'attempt':'current-attempt'}
+        self.compute.reservation_state=reservation
+        await self.service.start('w',actor='instructor')
+        self.assertEqual((await self.service.get('w'))['state'],'running')
+        self.assertEqual(self.deletes,0)
+
+
+    async def test_cancellation_during_share_publication_cannot_publish_running(self):
+        self.ready_after=0
+        async def shares(*args):
+            self.service._active_starts['w'].set()
+        self.hub.replace_shares=shares
+        with self.assertRaisesRegex(_WorkspaceStartCancelled,'cancelled'):
+            await self.service.start('w',actor='instructor')
+        self.assertEqual((await self.service.get('w'))['state'],'stopped')
+        self.assertEqual(self.deletes,1)
 
 
 class StartBudgetConfigurationTests(unittest.TestCase):

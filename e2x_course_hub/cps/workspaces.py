@@ -449,7 +449,7 @@ class WorkspaceService:
             try:
                 registration = await self.compute.register_workspace(workspace,members,validation)
                 await self.filesystem.provision(workspace,actor=actor)
-                await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registration)
+                validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registration)
             except Exception:
                 # No Hub spawn was attempted. Keep bootstrap failures retryable;
                 # an unknown central binding cannot prove a reservation release.
@@ -467,6 +467,16 @@ class WorkspaceService:
                     await asyncio.wait_for(cancellable(workspace,cancellation), timeout=seconds)
                 await asyncio.wait_for(self.hub.replace_shares(workspace,workspace['group_id']),
                                        timeout=remaining())
+                # Hub readiness can race an external Stop. A GPU workspace may
+                # become running only while its central reservation still exists.
+                if validation.get('selected_gpu_memory_gib',0) > 0:
+                    current = await asyncio.wait_for(self.compute.reservation_state(identifier),timeout=remaining())
+                    if (not isinstance(current,dict) or current.get('workspace') != identifier
+                            or current.get('active') is not True
+                            or not isinstance(current.get('attempt'),str) or not current['attempt']):
+                        raise RuntimeError('GPU reservation ended before workspace startup confirmation')
+                if cancellation.is_set():
+                    raise _WorkspaceStartCancelled('Workspace start cancelled before readiness publication')
                 remaining()
             except Exception:
                 # A failed response can still leave a starting server; confirm shutdown first.
