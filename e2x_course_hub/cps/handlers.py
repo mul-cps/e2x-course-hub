@@ -109,6 +109,8 @@ class RecordsHandler(BaseAPIHandler):
     async def delete(self, kind):
         data = self.body()
         existing=next((r for r in await self.settings['course_provider'].list(kind) if r['id']==data.get('id')),None)
+        if existing is None and getattr(self.settings['course_provider'],'pool_guard',None) is not None:
+            existing=await self.settings['course_provider'].deleted_record(kind,data.get('id'))
         if existing is None:raise web.HTTPError(404)
         actor = await self.authorize_record(kind,existing)
         await self.check_reconciliation_barrier(kind,existing)
@@ -122,6 +124,6 @@ class RecordsHandler(BaseAPIHandler):
             raise web.HTTPError(400, reason=str(error))
         except PermissionError as error:
             raise web.HTTPError(403, reason=str(error))
-        self.set_status(204)
+        self.set_status(202 if getattr(self.settings['course_provider'],'pool_guard',None) is not None else 204)
 
 default_handlers = [(r'/api/local/(courses|terms|memberships|groups|groupings|projects|assignments|workspaces|audit)', RecordsHandler)]

@@ -29,6 +29,7 @@ class HandlersTest(AsyncHTTPTestCase):
         class Records(RecordsHandler):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
+        self.record_handler=Records
         from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler
         class Assignment(AssignmentHandler):
             get_current_user=Records.get_current_user
@@ -265,6 +266,39 @@ class HandlersTest(AsyncHTTPTestCase):
         self.provider.console='cit'
         response=self.fetch('/records/courses')
         self.assertEqual(json.loads(response.body),{'records':[]})
+
+    def test_managed_delete_retry_uses_retained_preimage_and_remains_authorized(self):
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        from e2x_course_hub.cps.compute import ComputePolicyClient
+        from tornado.httpclient import HTTPClientError
+        client=ComputePolicyClient('https://gateway.invalid','test','cps')
+        guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+        transition='22222222-2222-4222-8222-222222222222';lost=[True]
+        async def rpc(path,method='GET',payload=None):
+            self.assertFalse(self.provider.db.in_transaction)
+            if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+            if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':transition,'receipt':None}
+            if path.endswith('prepare-write'):return {'database_id':guard.database_id,'transition_id':transition,
+                'operation':payload['operation'],'input_sha256':digest(payload),'receipt':None,'mutation_result':None}
+            if lost[0]:lost[0]=False;raise HTTPClientError(599)
+            return {'state':'pending','transition_id':transition}
+        client._request=rpc
+        async def setup():
+            await self.provider.put('courses',{'id':'c','name':'Physics'},actor='seed')
+            await migrate_pool_source_guard(self.provider,guard)
+        self.io_loop.run_sync(setup)
+        request=dict(method='DELETE',body=json.dumps({'id':'c'}),allow_nonstandard_methods=True)
+        self.assertEqual(self.fetch('/records/courses',**request).code,500)
+        self.assertEqual(self.fetch('/records/courses',**request).code,202)
+        async def student(handler):return User(username='student',admin=False,groups=[])
+        self.admin=False
+        with patch.object(self.record_handler,'get_user',student):
+            self.assertEqual(self.fetch('/records/courses',**request).code,403)
+        self.assertEqual(self.provider.db.execute("SELECT COUNT(*) FROM audit WHERE kind='courses' AND outcome='success'").fetchone()[0],2)
+        self.assertEqual(self.provider.db.execute("SELECT COUNT(*) FROM audit WHERE kind='http:DELETE' AND outcome='success'").fetchone()[0],1)
+        self.assertEqual(self.provider.db.execute('SELECT COUNT(*) FROM pool_source_receipt').fetchone()[0],1)
+
+
 
 from e2x_course_hub.cps.proxy import ComputeCSRFHandler
 from e2x_course_hub.cps.oauth import CPSHubOAuth

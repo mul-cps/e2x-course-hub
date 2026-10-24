@@ -115,6 +115,14 @@ class LocalCourseProvider:
             raise ValueError('Managed Source cannot use an already-open legacy writer')
         if self.pool_guard is not None and installed!=SOURCE_SCHEMA:
             raise ValueError('Managed Source custody missing or corrupt')
+        if self.pool_guard is not None:
+            guard=self.pool_guard
+            if guard.binding!=(self.console,guard.client.base_url,guard.database_id) or guard.client.console!=self.console:
+                raise ValueError('Managed Source console/origin binding changed')
+            actual=str(Path(next(row[2] for row in self.db.execute('PRAGMA database_list') if row[1]=='main')).resolve())
+            rows=[tuple(row) for row in self.db.execute('SELECT console,origin,database_id,source_path FROM pool_source_authority')]
+            if rows!=[(*guard.binding,actual)]:
+                raise ValueError('Managed Source authority identity/path missing or changed')
 
     async def list(self, kind, course_id=None):
         self._kind(kind)
@@ -184,29 +192,87 @@ class LocalCourseProvider:
         if ticket is not None:await self.pool_guard.complete(ticket,record)
         return record
 
+    async def _deletion_receipt(self, kind, identifier):
+        if self.pool_guard is None:return None
+        self._pool_mode_guard()
+        if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+        current=await self.pool_guard.client._request('native-pool-head/current')
+        if current.get('database_id')!=self.pool_guard.database_id:raise ValueError('Source custody changed')
+        row=self.db.execute('SELECT input_sha256,result FROM pool_source_receipt WHERE transition_id=?',
+                            (current.get('transition_id'),)).fetchone()
+        if row is None:return None
+        result=json.loads(row['result'])
+        if (not isinstance(result,dict) or set(result)!={'deleted','kind','record'}
+            or result['deleted'] is not True or result['kind']!=kind
+            or not isinstance(result['record'],dict) or result['record'].get('id')!=identifier):return None
+        from .pool_heads import digest
+        payload={'console':self.console,'kind':kind,'record':result['record']}
+        if result['record'].get('source')!='local' or row['input_sha256']!=digest({'operation':'admin.record.delete','payload':payload}):
+            raise ValueError('Retained Source deletion receipt differs')
+        return current,result
+
+    async def deleted_record(self, kind, identifier):
+        """Original record for authorizing an exact pending-delete retry, never discovery."""
+        self._kind(kind)
+        receipt=await self._deletion_receipt(kind,identifier)
+        return receipt[1]['record'] if receipt else None
+
+    def _check_delete_references(self, kind, identifier, record):
+        # Local SQL only: the same checks run again under the write transaction.
+        def records(child, course_id=None):
+            rows=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=?',(self.console,child))
+            values=[json.loads(row['payload']) for row in rows]
+            return [r for r in values if course_id is None or r.get('course_id')==course_id]
+        if kind=='groups':
+            children=records('workspaces')+records('memberships')+records('groupings')
+            if any(r.get('group_id')==identifier or identifier in r.get('group_ids',[]) for r in children):
+                raise ValueError('group still has workspace/membership references; controlled lifecycle required')
+        if kind=='terms':
+            term_id=record.get('term_id',identifier)
+            for child in ('memberships','groups','groupings','assignments','workspaces'):
+                if any(r.get('term_id')==term_id for r in records(child,record['course_id'])):
+                    raise ValueError('term still has references; controlled lifecycle required')
+        if kind=='courses':
+            if any(records(child,identifier) for child in KINDS[1:]):
+                raise ValueError('course still has referenced records; archive workspaces first')
+
     @audited_mutation
     async def delete(self, kind, identifier, *, actor):
-        if self.pool_guard is not None:self.pool_guard.deny_uncovered('record deletion')
         self._kind(kind)
-        previous = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?', (self.console, kind, identifier)).fetchone()
-        if not previous: raise KeyError(identifier)
-        if json.loads(previous['payload']).get('source') != 'local': raise PermissionError('externally managed record')
-        if kind == 'groups':
-            children = await self.list('workspaces') + await self.list('memberships') + await self.list('groupings')
-            if any(w.get('group_id') == identifier or identifier in w.get('group_ids',[]) for w in children):
-                raise ValueError('group still has workspace/membership references; controlled lifecycle required')
-        if kind == 'terms':
-            term = json.loads(previous['payload'])
-            term_id = term.get('term_id',identifier)
-            for child in ('memberships','groups','groupings','assignments','workspaces'):
-                if any(r.get('term_id') == term_id for r in await self.list(child,term['course_id'])):
-                    raise ValueError('term still has references; controlled lifecycle required')
-        if kind == 'courses':
-            for child in KINDS[1:]:
-                if await self.list(child, identifier): raise ValueError('course still has referenced records; archive workspaces first')
+        if not isinstance(identifier,str) or not identifier or not actor:raise ValueError('id and actor are required')
+        if self.pool_guard is not None:
+            if kind not in ('courses','terms','groups'):self.pool_guard.deny_uncovered('lifecycle-sensitive deletion')
+            if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+        previous=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',
+                                  (self.console,kind,identifier)).fetchone()
+        if previous is None:
+            receipt=await self._deletion_receipt(kind,identifier)
+            if receipt is None:raise KeyError(identifier)
+            current,result=receipt
+            if current.get('receipt') is None:await self.pool_guard.complete(current,result)
+            return
+        record=json.loads(previous['payload'])
+        if record.get('source')!='local':raise PermissionError('externally managed record')
+        self._check_delete_references(kind,identifier,record)
+        ticket=None
+        if self.pool_guard is not None:
+            ticket=await self.pool_guard.prepare('admin.record.delete',
+                {'console':self.console,'kind':kind,'record':record})
+        result={'deleted':True,'kind':kind,'record':record}
         with self.db:
-            self.db.execute('DELETE FROM records WHERE console=? AND kind=? AND id=?', (self.console, kind, identifier))
-            self._audit(actor, kind, identifier, previous['payload'], None)
+            if ticket is not None:
+                self.db.execute('BEGIN IMMEDIATE');self._pool_mode_guard()
+                current=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',
+                                        (self.console,kind,identifier)).fetchone()
+                if current is None or current['payload']!=previous['payload']:
+                    raise ValueError('Source preimage changed while admission was fenced')
+                self._check_delete_references(kind,identifier,record)
+            self.db.execute('DELETE FROM records WHERE console=? AND kind=? AND id=?',(self.console,kind,identifier))
+            self._audit(actor,kind,identifier,previous['payload'],None)
+            if ticket is not None:
+                self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
+                    (ticket['transition_id'],ticket['input_sha256'],json.dumps(result,sort_keys=True)))
+        if ticket is not None:await self.pool_guard.complete(ticket,result)
 
     def _audit(self, actor, kind, identifier, old, new):
         self.db.execute('INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (actor, self.console, kind, identifier, old, new, datetime.now(timezone.utc).isoformat(), 'success'))
