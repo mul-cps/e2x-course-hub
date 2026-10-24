@@ -1,0 +1,75 @@
+{
+  "complete_writer_coverage": false,
+  "deployed": false,
+  "full_suites": {
+    "admin": {
+      "log_sha256": "d443fe25fe7312b3769a08db5f993a2c841561e39051c13683bd4b882d79ccd3",
+      "passed": 93,
+      "seconds": 0.78,
+      "subtests": 35
+    },
+    "compute": {
+      "log_sha256": "5c2b34bd1ff9198ffa16bfb545befdb104a595b220f6e9fea566853944a1303c",
+      "passed": 5889,
+      "seconds": 689.85,
+      "skipped": 6,
+      "subtests": 68,
+      "warnings": 623
+    }
+  },
+  "implemented": [
+    "Explicit same-database fenced genesis and exact transition/input ownership",
+    "Real grant and provider-PUT fence-before-write RPC/SQL path with pending202",
+    "Atomic Source result receipts and exact lost-reply recovery",
+    "Explicit managed-mode migration; constructors and managed connections cannot recreate lost custody",
+    "Persistent markers guard direct and reopened legacy writers",
+    "Exact immutable activation/catalog/Source readback and authenticated bounded ACK retention",
+    "One SQL snapshot per operation; drained offloading keeps RPC responsive"
+  ],
+  "live_migration": false,
+  "operator_finalization_available": false,
+  "production_ready": false,
+  "remaining": [
+    "Operator applicator, finalized active receipts and complete writer coverage",
+    "Implement currently denied workspace/storage/approval/delete/import/identity/legacy managed mutations",
+    "Component pending-target application and genuine active ACK production",
+    "Selected-device Node/Binding runtime integration and confirmed native-zero release",
+    "KAI producers, retirement guard and hardware/production qualification",
+    "Qualified Hub configuration rotation and safe Fleet reconciliation"
+  ],
+  "repositories": {
+    "admin": "bd777ea636989de039f5d07cc9c3f5aad10601cc",
+    "compute": "3b7cac6fecc22ca8ebd56f8b1127516f99bc6999"
+  },
+  "review": {
+    "important_critical_remaining": 0,
+    "independent_admin_focus_passed": 13,
+    "independent_compute_focus_passed": 43,
+    "independent_registry_compatibility_focus_passed": 91,
+    "original_registry_capture_regression_preserved_and_fixed": true
+  },
+  "runtime_activation": false,
+  "schema": "cps-authoritative-head-writer-fencing-software/v1",
+  "source_sha256": {
+    "admin": {
+      "e2x_course_hub/api/hub_api.py": "609e9d7803753943fcfdc540a6333b7c283835511fb22271c2666d7ade5b4e51",
+      "e2x_course_hub/cps/handlers.py": "ec8f70b8422f6aa5e8cc73b7b30079cd8e73fc6c311f5d4d9a42f96192b4875a",
+      "e2x_course_hub/cps/platform_handlers.py": "1dca836b62ae8dea143127c419b17c82be3f623df4800a426aff5dfa58a95a7d",
+      "e2x_course_hub/cps/pool_heads.py": "ba481a24b404e11c08e614fbf0e28d885130ccacfc856a0157d1d95f3d565456",
+      "e2x_course_hub/cps/providers.py": "a3e797ff72e467180856aa5173f101a5c42005573e5252161d7da0a28829fec5",
+      "tests/test_pool_source_guards.py": "2ac39a5495c9987972a6fff5262e1886aa0388ecf004bbddd2832a4cdfc6e6a2"
+    },
+    "compute": {
+      "docs/superpowers/plans/2026-10-24-authoritative-head-writer-fencing.md": "2cb090f0bbc585b037e4983fcce13f9d4e1355c0405f8e8bd9a78d5e2debfade",
+      "src/cps_compute/internal.py": "76c1266ca57e85627118332d88255de82f4af00a7ed455f9fded39ca247223d5",
+      "src/cps_compute/native_group_approvals.py": "106ecbb5dbfd74fc74f35bdf3c4e60f6e06c9963a4db88c000609810d72aee6d",
+      "src/cps_compute/native_pool_attempts.py": "4af11893ba01f07adaa88aad91de52ac9a59f96974e393cd15b30c7b33d0489c",
+      "src/cps_compute/native_pool_heads.py": "1b4b1223da4de17ea2c807a409999a8b507b86089f6090d74152ff05325db730",
+      "src/cps_compute/runtime.py": "e6a2b70ba4410451f8b4477ea1522773c87531e9be487055d7f07bf14b12c432",
+      "tests/test_native_pool_admin_rpc.py": "f72ed9891406cd8a4adff3e72cbaa31bc028c355fedb8619c5804a94c604ac81",
+      "tests/test_native_pool_head_responsiveness.py": "88b0fff825474f837ff6ef424a465e13d8b611f21eea85e4363633b96911ef36",
+      "tests/test_native_pool_heads.py": "dd6e8c09567b6994b87078ad809d2af0648f60b66e76be20e3ac382f846b7bfa",
+      "tests/test_native_pool_writer_guards.py": "0d74e89f27e7f8712913e33e5de80b1b03294e95a5874926ea98fc5d7357c8e8"
+    }
+  }
+}
