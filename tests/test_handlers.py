@@ -30,7 +30,7 @@ class HandlersTest(AsyncHTTPTestCase):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
         self.record_handler=Records
-        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler
+        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
         class Assignment(AssignmentHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
@@ -38,6 +38,9 @@ class HandlersTest(AsyncHTTPTestCase):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
         class Compute(ComputeHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class Identity(IdentityMappingHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
         class Service:
@@ -49,7 +52,7 @@ class HandlersTest(AsyncHTTPTestCase):
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
             (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
-            (r'/compute',Compute)],workspace_service=Service(),
+            (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
 
@@ -337,6 +340,38 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(changed.code,400)
         self.admin=False
         self.assertEqual(self.fetch('/assignment',method='POST',body=json.dumps(data)).code,403)
+
+    def test_managed_identity_lost_reply_retry_is_pending_and_authorized(self):
+        from e2x_course_hub.cps.compute import ComputePolicyClient
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        from tornado.httpclient import HTTPClientError
+        client=ComputePolicyClient('https://gateway.invalid','test','cps')
+        guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+        fail=[True]
+        async def rpc(path,method='GET',body=None):
+            self.assertFalse(self.provider.db.in_transaction)
+            if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+            if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':'pending'}
+            if path.endswith('prepare-write'):return {'database_id':guard.database_id,'transition_id':'pending',
+                'operation':body['operation'],'input_sha256':digest(body),'receipt':None,'mutation_result':None}
+            if path.endswith('complete-write'):
+                if fail[0]:fail[0]=False;raise HTTPClientError(599)
+                return {'state':'pending','transition_id':'pending'}
+            raise AssertionError(path)
+        client._request=rpc
+        self.io_loop.run_sync(lambda:migrate_pool_source_guard(self.provider,guard))
+        row={'hub':'cps','username':'student','email':'Student@Example.edu','person_id':'00000000-0000-4000-8000-000000000001',
+            'verified':True,'administrator_reviewed':True}
+        body=json.dumps({'mappings':[row]})
+        self.assertEqual(self.fetch('/identities',method='POST',body=body).code,500)
+        retry=self.fetch('/identities',method='POST',body=body)
+        self.assertEqual(retry.code,202)
+        self.assertEqual(json.loads(retry.body)['state'],'pending')
+        self.assertEqual(json.loads(retry.body)['linked']['student']['email'],'student@example.edu')
+        self.assertEqual(self.provider.db.execute("SELECT COUNT(*) FROM audit WHERE kind='identities' AND outcome='success'").fetchone()[0],1)
+        self.assertEqual(self.fetch('/identities',method='POST',body=json.dumps({'mappings':[{**row,'email':'other@example.edu'}]})).code,400)
+        self.admin=False
+        self.assertEqual(self.fetch('/identities',method='POST',body=body).code,403)
 
 from e2x_course_hub.cps.proxy import ComputeCSRFHandler
 from e2x_course_hub.cps.oauth import CPSHubOAuth

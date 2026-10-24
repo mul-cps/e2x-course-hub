@@ -396,39 +396,93 @@ class LocalCourseProvider:
             finally:
                 self._importing = False
 
+    def _identity_projection(self, usernames):
+        return {'accounts':[dict(row) for row in self.db.execute('SELECT * FROM email_links WHERE console=? ORDER BY username',
+                    (self.console,)) if row['username'] in usernames],
+            'memberships':[record for row in self.db.execute("SELECT payload FROM records WHERE console=? AND kind='memberships' ORDER BY id",
+                    (self.console,)) if (record:=json.loads(row['payload']))['person_id'] in usernames]}
+
+    async def _managed_identity_link(self, rows, *, actor):
+        if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+        if type(rows) is not list or not 1<=len(rows)<=1000 or not actor:
+            raise ValueError('Bounded explicit identity mappings and actor required')
+        allowed={'hub','username','email','person_id','verified','administrator_reviewed'}
+        if any(type(row) is not dict or set(row)-allowed or row.get('hub')!=self.console
+            or type(row.get('administrator_reviewed',False)) is not bool for row in rows):
+            raise ValueError('Closed console-owned reviewed identity mappings required')
+        from .identity import reviewed_email_mapping
+        mapping=reviewed_email_mapping(rows)
+        proofs={row['username']:row.get('administrator_reviewed',False) for row in rows}
+        normalized=[{'hub':self.console,'username':username,**mapping[(self.console,username)],
+            'verified':True,'administrator_reviewed':proofs[username]} for username in sorted(proofs)]
+        view=object.__new__(LocalCourseProvider)
+        view.console=self.console;view.db=sqlite3.connect(':memory:');view.db.row_factory=sqlite3.Row
+        try:
+            self.db.backup(view.db);before=view._import_preimage()
+            linked=await view._link_identities(normalized,actor=actor)
+            result={'linked':linked,**view._identity_projection(set(linked))}
+        finally:view.db.close()
+        from .pool_heads import digest
+        operation='admin.identity.link';payload={'console':self.console,'mappings':normalized}
+        expected=digest({'operation':operation,'payload':payload})
+        current=await self.pool_guard.client._request('native-pool-head/current')
+        if current.get('database_id')!=self.pool_guard.database_id:raise ValueError('Source custody changed')
+        receipt=self.db.execute('SELECT input_sha256,result FROM pool_source_receipt WHERE transition_id=?',
+            (current.get('transition_id'),)).fetchone()
+        if receipt is not None:
+            if receipt['input_sha256']!=expected or json.loads(receipt['result'])!=result:
+                raise ValueError('Retained Source identity receipt differs')
+            if self._identity_projection(set(linked))!={key:result[key] for key in ('accounts','memberships')}:
+                raise ValueError('Retained Source identity effects changed')
+            await self.pool_guard.complete(current,result)
+            return linked
+        ticket=await self.pool_guard.prepare(operation,payload)
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE');self._pool_mode_guard()
+            if self._import_preimage()!=before:raise ValueError('Source preimage changed while identity migration was fenced')
+            actual=await self._link_identities(normalized,actor=actor)
+            if actual!=linked or self._identity_projection(set(linked))!={key:result[key] for key in ('accounts','memberships')}:
+                raise ValueError('Source identity effects differ from validated plan')
+            self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
+                (ticket['transition_id'],ticket['input_sha256'],json.dumps(result,sort_keys=True)))
+        await self.pool_guard.complete(ticket,result)
+        return linked
+
     @audited_mutation
     async def link_identities(self, rows, *, actor):
-        if self.pool_guard is not None:self.pool_guard.deny_uncovered('identity migration')
+        if self.pool_guard is not None:return await self._managed_identity_link(rows,actor=actor)
+        with self.db:return await self._link_identities(rows,actor=actor)
+
+    async def _link_identities(self, rows, *, actor):
         from .identity import reviewed_email_mapping
         mapping=reviewed_email_mapping(rows)
         proofs={(row['hub'],row['username']):row for row in rows}
-        with self.db:
-            for (hub,username),identity in mapping.items():
-                if hub!=self.console:continue
-                email,person=identity['email'],identity['person_id']
-                collision=self.db.execute('SELECT username FROM email_links WHERE console=? AND canonical_person_id=? AND username<>?',(hub,person,username)).fetchone()
-                if collision:raise ValueError('duplicate canonical person within Hub requires explicit alias migration')
-                previous=self.db.execute('SELECT email,canonical_person_id FROM email_links WHERE console=? AND username=?',(hub,username)).fetchone()
-                if previous:
-                    if previous['canonical_person_id'] and previous['canonical_person_id']!=person:
-                        raise ValueError('existing canonical person reassignment requires a separate reviewed migration')
-                    if (previous['email']!=email or previous['canonical_person_id'] is None) and proofs[(hub,username)].get('administrator_reviewed') is not True:
-                        raise ValueError('email/UUID handover requires explicit administrator-reviewed mapping')
-                self.db.execute('INSERT INTO email_links(console,username,email,canonical_person_id,verified) VALUES (?,?,?,?,1) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,canonical_person_id=excluded.canonical_person_id,verified=1',(hub,username,email,person))
-                for row in self.db.execute("SELECT id,payload FROM records WHERE console=? AND kind='memberships'",(hub,)).fetchall():
-                    membership=json.loads(row['payload'])
-                    if membership['person_id']!=username:continue
-                    old_canonical=membership.get('canonical_person_id')
-                    if old_canonical not in (None,person,previous['email'] if previous else None):
-                        raise ValueError('membership canonical identity conflicts with reviewed mapping')
-                    if old_canonical!=person:
-                        if any(w.get('group_id')==membership.get('group_id') and w.get('state')!='stopped' for w in await self.list('workspaces')):
-                            raise ValueError('stop affected workspace before canonical identity migration')
-                        updated={**membership,'canonical_person_id':person}
-                        payload=json.dumps(updated,sort_keys=True)
-                        self.db.execute("UPDATE records SET payload=? WHERE console=? AND kind='memberships' AND id=?",(payload,hub,row['id']))
-                        self._audit(actor,'identity-membership',row['id'],row['payload'],payload)
-                self._audit(actor,'identities',username,json.dumps(dict(previous)) if previous else None,json.dumps(identity))
+        for (hub,username),identity in mapping.items():
+            if hub!=self.console:continue
+            email,person=identity['email'],identity['person_id']
+            collision=self.db.execute('SELECT username FROM email_links WHERE console=? AND canonical_person_id=? AND username<>?',(hub,person,username)).fetchone()
+            if collision:raise ValueError('duplicate canonical person within Hub requires explicit alias migration')
+            previous=self.db.execute('SELECT email,canonical_person_id FROM email_links WHERE console=? AND username=?',(hub,username)).fetchone()
+            if previous:
+                if previous['canonical_person_id'] and previous['canonical_person_id']!=person:
+                    raise ValueError('existing canonical person reassignment requires a separate reviewed migration')
+                if (previous['email']!=email or previous['canonical_person_id'] is None) and proofs[(hub,username)].get('administrator_reviewed') is not True:
+                    raise ValueError('email/UUID handover requires explicit administrator-reviewed mapping')
+            self.db.execute('INSERT INTO email_links(console,username,email,canonical_person_id,verified) VALUES (?,?,?,?,1) ON CONFLICT(console,username) DO UPDATE SET email=excluded.email,canonical_person_id=excluded.canonical_person_id,verified=1',(hub,username,email,person))
+            for row in self.db.execute("SELECT id,payload FROM records WHERE console=? AND kind='memberships'",(hub,)).fetchall():
+                membership=json.loads(row['payload'])
+                if membership['person_id']!=username:continue
+                old_canonical=membership.get('canonical_person_id')
+                if old_canonical not in (None,person,previous['email'] if previous else None):
+                    raise ValueError('membership canonical identity conflicts with reviewed mapping')
+                if old_canonical!=person:
+                    if any(w.get('group_id')==membership.get('group_id') and w.get('state')!='stopped' for w in await self.list('workspaces')):
+                        raise ValueError('stop affected workspace before canonical identity migration')
+                    updated={**membership,'canonical_person_id':person}
+                    payload=json.dumps(updated,sort_keys=True)
+                    self.db.execute("UPDATE records SET payload=? WHERE console=? AND kind='memberships' AND id=?",(payload,hub,row['id']))
+                    self._audit(actor,'identity-membership',row['id'],row['payload'],payload)
+            self._audit(actor,'identities',username,json.dumps(dict(previous)) if previous else None,json.dumps(identity))
         return {username:identity for (hub,username),identity in mapping.items() if hub==self.console}
 
     def backup(self, path):

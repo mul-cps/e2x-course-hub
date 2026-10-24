@@ -178,3 +178,106 @@ class ManagedImportTests(unittest.TestCase):
                     if fault=='authority':self.assertEqual(p.db.execute('SELECT COUNT(*) FROM pool_source_authority').fetchone()[0],0)
                     p.db.close()
                 asyncio.run(run())
+
+
+class ManagedIdentityTests(unittest.TestCase):
+    def test_verified_mapping_is_atomic_and_preserves_local_ids(self):
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        person='00000000-0000-4000-8000-000000000001'
+        for fault in ('none','unverified','reassignment','collision','running','preimage','authority','mid-commit'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                async def run():
+                    p=LocalCourseProvider(Path(tmp)/'source','cps')
+                    await p.put('courses',{'id':'course','name':'Original'},actor='seed')
+                    await p.put('groups',{'id':'group','course_id':'course'},actor='seed')
+                    await p.put('memberships',{'id':'member-original','person_id':'student','course_id':'course','group_id':'group'},actor='seed')
+                    await p.put('workspaces',{'id':'workspace','course_id':'course','group_id':'group','state':'running' if fault=='running' else 'stopped'},actor='seed')
+                    if fault in ('reassignment','collision'):
+                        await p.link_identities([{'hub':'cps','username':'student' if fault=='reassignment' else 'another',
+                            'email':'old@example.edu','person_id':'00000000-0000-4000-8000-000000000002' if fault=='reassignment' else person,
+                            'verified':True,'administrator_reviewed':True}],actor='seed')
+                    success_before=p.db.execute("SELECT COUNT(*) FROM audit WHERE outcome='success'").fetchone()[0]
+                    membership_before=(await p.members('course'))[0]
+                    links_before=[dict(row) for row in p.db.execute('SELECT * FROM email_links')]
+                    client=ComputePolicyClient('https://gateway.invalid','test','cps')
+                    guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+                    calls=[]
+                    async def rpc(path,method='GET',body=None):
+                        self.assertFalse(p.db.in_transaction);calls.append(path)
+                        if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+                        if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':'pending'}
+                        if path.endswith('prepare-write'):
+                            self.assertEqual(body['operation'],'admin.identity.link')
+                            if fault=='preimage':
+                                p.db.execute("UPDATE records SET payload=? WHERE kind='courses'",('{"id":"course","name":"Concurrent","source":"local","external_id":null}',));p.db.commit()
+                            elif fault=='authority':p.db.execute('DELETE FROM pool_source_authority');p.db.commit()
+                            return {'database_id':guard.database_id,'transition_id':'pending','operation':body['operation'],
+                                'input_sha256':digest(body),'receipt':None,'mutation_result':None}
+                        if path.endswith('complete-write'):return {'state':'pending','transition_id':'pending'}
+                        raise AssertionError(path)
+                    client._request=rpc;await migrate_pool_source_guard(p,guard)
+                    if fault=='mid-commit':
+                        original=p._audit
+                        def audit(*args):
+                            if args[1]=='identities':raise OSError('controlled commit failure')
+                            return original(*args)
+                        p._audit=audit
+                    rows=[{'hub':'cps','username':'student','email':' Student@Example.edu ','person_id':person,
+                        'verified':fault!='unverified','administrator_reviewed':True}]
+                    if fault=='none':
+                        self.assertEqual(await p.link_identities(rows,actor='admin'),{'student':{'email':'student@example.edu','person_id':person}})
+                    else:
+                        with self.assertRaises((ValueError,OSError)):await p.link_identities(rows,actor='admin')
+                    membership=(await p.members('course'))[0]
+                    self.assertEqual(membership['id'],'member-original');self.assertEqual(membership['person_id'],'student')
+                    if fault=='none':self.assertEqual(membership['canonical_person_id'],person)
+                    else:
+                        self.assertEqual(membership,membership_before)
+                        self.assertEqual([dict(row) for row in p.db.execute('SELECT * FROM email_links')],links_before)
+                    self.assertEqual(p.db.execute("SELECT COUNT(*) FROM audit WHERE outcome='success'").fetchone()[0],success_before+(2 if fault=='none' else 0))
+                    self.assertEqual(p.db.execute('SELECT COUNT(*) FROM pool_source_receipt').fetchone()[0],1 if fault=='none' else 0)
+                    self.assertEqual(sum(path.endswith('complete-write') for path in calls),1 if fault=='none' else 0)
+                    if fault in ('unverified','reassignment','collision','running'):
+                        self.assertFalse(any(path.endswith('prepare-write') for path in calls))
+                    p.db.close()
+                asyncio.run(run())
+
+    def test_retry_never_repairs_changed_identity_effects_from_a_receipt(self):
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        import json
+        for fault in ('verified','email','membership'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                async def run():
+                    p=LocalCourseProvider(Path(tmp)/'source','cps')
+                    await p.put('courses',{'id':'c'},actor='seed')
+                    await p.put('memberships',{'id':'m','person_id':'student','course_id':'c'},actor='seed')
+                    client=ComputePolicyClient('https://gateway.invalid','test','cps')
+                    guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+                    completed=[]
+                    async def rpc(path,method='GET',body=None):
+                        self.assertFalse(p.db.in_transaction)
+                        if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+                        if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':'pending'}
+                        if path.endswith('prepare-write'):return {'database_id':guard.database_id,'transition_id':'pending',
+                            'operation':body['operation'],'input_sha256':digest(body),'receipt':None,'mutation_result':None}
+                        if path.endswith('complete-write'):
+                            completed.append(body);return {'state':'pending','transition_id':'pending'}
+                        raise AssertionError(path)
+                    client._request=rpc;await migrate_pool_source_guard(p,guard)
+                    rows=[{'hub':'cps','username':'student','email':'student@example.edu','person_id':'00000000-0000-4000-8000-000000000001',
+                        'verified':True,'administrator_reviewed':True}]
+                    await p.link_identities(rows,actor='admin')
+                    success=p.db.execute("SELECT COUNT(*) FROM audit WHERE outcome='success'").fetchone()[0]
+                    if fault=='verified':p.db.execute('UPDATE email_links SET verified=0')
+                    elif fault=='email':p.db.execute("UPDATE email_links SET email='changed@example.edu'")
+                    else:
+                        record=(await p.members('c'))[0];record['canonical_person_id']=None
+                        p.db.execute("UPDATE records SET payload=? WHERE kind='memberships'",(json.dumps(record),))
+                    p.db.commit();before=p._identity_projection({'student'})
+                    with self.assertRaises(ValueError):await p.link_identities(rows,actor='admin')
+                    self.assertEqual(p._identity_projection({'student'}),before)
+                    self.assertEqual(len(completed),1)
+                    self.assertEqual(p.db.execute("SELECT COUNT(*) FROM audit WHERE outcome='success'").fetchone()[0],success)
+                    self.assertEqual(p.db.execute('SELECT COUNT(*) FROM pool_source_receipt').fetchone()[0],1)
+                    p.db.close()
+                asyncio.run(run())

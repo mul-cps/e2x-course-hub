@@ -172,6 +172,9 @@ class IdentityMappingHandler(RecordsHandler):
         if any(row.get('hub')!=self.settings['console_owner'] for row in data['mappings']):raise web.HTTPError(403,reason='Console can link only its own Hub accounts')
         try:result=await self.settings['course_provider'].link_identities(data['mappings'],actor=actor)
         except (ValueError,TypeError,sqlite3.IntegrityError) as error:raise web.HTTPError(400,reason=str(error))
-        self.write({'linked':result})
+        if getattr(self.settings['course_provider'],'pool_guard',None) is not None:
+            self.set_status(202)
+            self.write({'linked':result,'state':'pending'})
+        else:self.write({'linked':result})
 
 default_handlers.append((r'/api/identities',IdentityMappingHandler))

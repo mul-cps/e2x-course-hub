@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-25",
+  "source_sha256": {
+    "compute": {
+      "src/cps_compute/native_pool_heads.py": "efb8ca5816024d8623645445d150c8e3dde7961f1298a01a03aabe9e06520b02",
+      "tests/test_native_pool_admin_rpc.py": "8ea37c0fd32585c3fd6580c9948d0464dae93854d27bface7c46f162bc93fd1a"
+    },
+    "admin": {
+      "e2x_course_hub/cps/providers.py": "e21013a451cdde4e26b3e25dd7f9b263a82bf5862fe156cac1d398d8dbdcbfc6",
+      "e2x_course_hub/cps/platform_handlers.py": "46734896683008b764daa9bea6ab4807654cabf3baa55e610361e5d48cb8ad7f",
+      "tests/test_handlers.py": "4b8fc7fcb5e9d1e14803e06edf317c228913dace235dd0bb13561452dcbdaf71",
+      "tests/test_pool_source_guards.py": "d0be67c4524addd38b758ff3245a3d8c10454af5de4cde861abf6ce6338bbfe5"
+    }
+  },
+  "checks": {
+    "admin": {
+      "passed": 102,
+      "subtests_passed": 55,
+      "exit_code": 0
+    },
+    "compute_pool": {
+      "passed": 448,
+      "warnings": 1,
+      "exit_code": 0
+    },
+    "compute_complete_serial": {
+      "passed": 5967,
+      "skipped": 6,
+      "warnings": 623,
+      "subtests_passed": 68,
+      "seconds": 678.16,
+      "exit_code": 0
+    }
+  },
+  "boundary": "Actual Source SQLite and authenticated in-process RPC with controlled transport faults. No live identity, workspace, reservation, runtime configuration or activation changes."
+}
