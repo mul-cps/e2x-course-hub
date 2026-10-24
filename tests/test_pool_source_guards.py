@@ -123,3 +123,58 @@ class SourceGuardTests(unittest.TestCase):
                 client._request.assert_not_awaited()
                 self.assertEqual(len(await p.courses()),1)
             asyncio.run(run());p.db.close()
+
+
+class ManagedImportTests(unittest.TestCase):
+    def test_import_is_one_fenced_atomic_batch_with_reference_validation(self):
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        for fault in ('none','bad-reference','duplicate','preimage','authority','mid-commit'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                async def run():
+                    p=LocalCourseProvider(Path(tmp)/'source','cps')
+                    await p.put('courses',{'id':'seed','name':'Original'},actor='seed')
+                    client=ComputePolicyClient('https://gateway.invalid','test','cps')
+                    guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+                    calls=[]
+                    async def rpc(path,method='GET',body=None):
+                        self.assertFalse(p.db.in_transaction)
+                        calls.append(path)
+                        if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+                        if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':'pending'}
+                        if path.endswith('prepare-write'):
+                            self.assertEqual(body['operation'],'admin.record.import')
+                            self.assertEqual([item['record']['id'] for item in body['payload']['records']],['new','second','term'])
+                            if fault=='preimage':
+                                p.db.execute("UPDATE records SET payload=? WHERE id='seed'",('{"id":"seed","name":"Concurrent","source":"local","external_id":null}',));p.db.commit()
+                            elif fault=='authority':p.db.execute('DELETE FROM pool_source_authority');p.db.commit()
+                            return {'database_id':guard.database_id,'transition_id':'pending','operation':body['operation'],
+                                'input_sha256':digest(body),'receipt':None,'mutation_result':None}
+                        if path.endswith('complete-write'):return {'state':'pending','transition_id':'pending'}
+                        raise AssertionError(path)
+                    client._request=rpc
+                    await migrate_pool_source_guard(p,guard)
+                    records={'courses':[{'id':'new','name':'Physics'},{'id':'second','name':'Mathematics'}],
+                        'terms':[{'id':'term','course_id':'new','name':'Winter'}]}
+                    if fault=='bad-reference':records['terms'][0]['course_id']='missing'
+                    if fault=='duplicate':records['courses'][1]['id']='new'
+                    if fault=='mid-commit':
+                        original=p._audit
+                        def audit(*args):
+                            if args[2]=='second':raise OSError('controlled commit failure')
+                            return original(*args)
+                        p._audit=audit
+                    if fault=='none':await p.migrate_local(records,actor='reviewed-admin')
+                    else:
+                        with self.assertRaises((ValueError,OSError)):await p.migrate_local(records,actor='reviewed-admin')
+                    rows=await p.courses()
+                    self.assertEqual({r['id'] for r in rows},{'seed','new','second'} if fault=='none' else {'seed'})
+                    self.assertEqual(len(await p.terms('new')),1 if fault=='none' else 0)
+                    self.assertEqual(p.db.execute('SELECT COUNT(*) FROM pool_source_receipt').fetchone()[0],1 if fault=='none' else 0)
+                    self.assertEqual(p.db.execute("SELECT COUNT(*) FROM audit WHERE outcome='success'").fetchone()[0],4 if fault=='none' else 1)
+                    self.assertEqual(sum(path.endswith('complete-write') for path in calls),1 if fault=='none' else 0)
+                    if fault in ('bad-reference','duplicate'):
+                        self.assertFalse(any(path.endswith('prepare-write') for path in calls))
+                    if fault=='preimage':self.assertEqual(rows[0]['name'],'Concurrent')
+                    if fault=='authority':self.assertEqual(p.db.execute('SELECT COUNT(*) FROM pool_source_authority').fetchone()[0],0)
+                    p.db.close()
+                asyncio.run(run())

@@ -133,8 +133,7 @@ class LocalCourseProvider:
     def _kind(self, kind):
         if kind not in KINDS: raise ValueError('unknown record kind')
 
-    @audited_mutation
-    async def put(self, kind, record, *, actor):
+    async def _normalize_record(self, kind, record, *, actor):
         self._kind(kind)
         record = dict(record)
         identifier = record['id']
@@ -161,6 +160,13 @@ class LocalCourseProvider:
             if not exists: raise ValueError('course reference does not exist in this console')
         from .validation import validate
         record = await validate(self,kind,record)
+        return record, previous['payload'] if previous else None
+
+    @audited_mutation
+    async def put(self, kind, record, *, actor):
+        record, previous_payload = await self._normalize_record(kind,record,actor=actor)
+        identifier=record['id']
+        previous={'payload':previous_payload} if previous_payload is not None else None
         payload = json.dumps(record, sort_keys=True)
         ticket=None
         if self.pool_guard is not None:
@@ -293,11 +299,94 @@ class LocalCourseProvider:
     async def groups(self, course_id): return await self.list('groups', course_id)
     async def groupings(self, course_id): return await self.list('groupings', course_id)
 
+    async def retained_import(self, kind, identifier):
+        """Retained batch for an already-authorized exact HTTP retry, never discovery."""
+        self._kind(kind);self._pool_mode_guard()
+        if self.pool_guard is None:return None
+        if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+        current=await self.pool_guard.client._request('native-pool-head/current')
+        if current.get('database_id')!=self.pool_guard.database_id:raise ValueError('Source custody changed')
+        row=self.db.execute('SELECT input_sha256,result FROM pool_source_receipt WHERE transition_id=?',
+            (current.get('transition_id'),)).fetchone()
+        if row is None:return None
+        result=json.loads(row['result'])
+        if type(result) is not dict or set(result)!={'imported'}:return None
+        batch=result['imported']
+        if type(batch) is not list or not 1<=len(batch)<=1000 or any(type(item) is not dict
+            or set(item)!={'kind','record'} or item['kind'] not in KINDS or type(item['record']) is not dict
+            or item['record'].get('source')!='local' or type(item['record'].get('id')) is not str for item in batch):
+            raise ValueError('Retained Source import is corrupt')
+        from .pool_heads import digest
+        if row['input_sha256']!=digest({'operation':'admin.record.import','payload':{'console':self.console,'records':batch}}):
+            raise ValueError('Retained Source import receipt differs')
+        return batch if any(item['kind']==kind and item['record']['id']==identifier for item in batch) else None
+
+    def _import_preimage(self):
+        return {table:[tuple(row) for row in self.db.execute('SELECT * FROM '+table+' ORDER BY rowid')]
+                for table in ('records','email_links')}
+
+    async def _managed_import(self, records, *, actor):
+        if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+        if type(records) is not dict or set(records)-set(KINDS) or not actor:
+            raise ValueError('Closed owned import and actor required')
+        if any(type(rows) is not list for rows in records.values()):raise ValueError('Import records must be lists')
+        count=sum(len(rows) for rows in records.values())
+        if not 1<=count<=1000:raise ValueError('Import requires 1 to 1000 records')
+        # A private in-memory validation view never becomes a Source writer or
+        # adopts copied custody. No RPC, audit, or mutation touches the live DB.
+        view=object.__new__(LocalCourseProvider)
+        view.console=self.console;view.db=sqlite3.connect(':memory:');view.db.row_factory=sqlite3.Row
+        planned=[];seen=set()
+        try:
+            self.db.backup(view.db)
+            before=view._import_preimage()
+            for kind in KINDS:
+                for supplied in records.get(kind,[]):
+                    record,_=await view._normalize_record(kind,supplied,actor=actor)
+                    key=(kind,record['id'])
+                    if key in seen:raise ValueError('Duplicate record in import')
+                    seen.add(key);planned.append({'kind':kind,'record':record})
+                    view.db.execute('INSERT OR REPLACE INTO records VALUES(?,?,?,?)',
+                        (self.console,kind,record['id'],json.dumps(record,sort_keys=True)))
+        finally:view.db.close()
+        from .pool_heads import digest
+        operation='admin.record.import';payload={'console':self.console,'records':planned}
+        expected=digest({'operation':operation,'payload':payload})
+        current=await self.pool_guard.client._request('native-pool-head/current')
+        if current.get('database_id')!=self.pool_guard.database_id:raise ValueError('Source custody changed')
+        receipt=self.db.execute('SELECT input_sha256,result FROM pool_source_receipt WHERE transition_id=?',
+            (current.get('transition_id'),)).fetchone()
+        result={'imported':planned}
+        if receipt is not None:
+            if receipt['input_sha256']!=expected or json.loads(receipt['result'])!=result:
+                raise ValueError('Retained Source import receipt differs')
+            for item in planned:
+                row=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',
+                    (self.console,item['kind'],item['record']['id'])).fetchone()
+                if row is None or json.loads(row['payload'])!=item['record']:
+                    raise ValueError('Retained imported records changed')
+            await self.pool_guard.complete(current,result)
+            return
+        ticket=await self.pool_guard.prepare(operation,payload)
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE');self._pool_mode_guard()
+            if self._import_preimage()!=before:raise ValueError('Source preimage changed while import was fenced')
+            for item in planned:
+                kind,record=item['kind'],item['record']
+                previous=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',
+                    (self.console,kind,record['id'])).fetchone()
+                raw=json.dumps(record,sort_keys=True)
+                self.db.execute('INSERT OR REPLACE INTO records VALUES(?,?,?,?)',(self.console,kind,record['id'],raw))
+                self._audit(actor,kind,record['id'],previous['payload'] if previous else None,raw)
+            self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
+                (ticket['transition_id'],ticket['input_sha256'],json.dumps(result,sort_keys=True)))
+        await self.pool_guard.complete(ticket,result)
+
     @audited_mutation
     async def migrate_local(self, records, *, actor):
         self._pool_mode_guard()
         """Explicit import preserves IDs and all workspace references; never match names."""
-        if self.pool_guard is not None:self.pool_guard.deny_uncovered('batch import')
+        if self.pool_guard is not None:return await self._managed_import(records,actor=actor)
         with self.db:
             self._importing = True
             try:

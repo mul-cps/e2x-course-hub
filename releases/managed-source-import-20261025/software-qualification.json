@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-25",
+  "source_sha256": {
+    "compute": {
+      "src/cps_compute/native_pool_heads.py": "491ac3ee07b987294b26b168419844b5467ef6b48f72647da8672a51e9cb6022",
+      "tests/test_native_pool_admin_rpc.py": "731412e7fffafbcb7378db45e7d50f96c657af29e8de3411ab59d11fa9ec3b97"
+    },
+    "admin": {
+      "e2x_course_hub/cps/providers.py": "3172fc00950bd47ba939eaf8ea64f91acdbafda40e9ffee5c548c75cfe68aaa9",
+      "e2x_course_hub/cps/platform_handlers.py": "588996b8c08fffd9d379e6bd4524ce42c8a70dd8dcbfe8ed8272be8701e46046",
+      "tests/test_pool_source_guards.py": "767d2f04ad10a350e37814b68aeef1433d4eff7e7c7f7e2d1e50197a67b05709",
+      "tests/test_handlers.py": "d860b6d8389c0335bdd4441853ef8c7243c12b5ad334744f10bdc709d99f8160"
+    }
+  },
+  "checks": {
+    "admin": {
+      "passed": 99,
+      "subtests_passed": 44,
+      "exit_code": 0
+    },
+    "compute_pool": {
+      "passed": 445,
+      "warnings": 1,
+      "exit_code": 0
+    },
+    "compute_complete": {
+      "passed": 5964,
+      "skipped": 6,
+      "warnings": 623,
+      "subtests_passed": 68,
+      "seconds": 677.59,
+      "exit_code": 0
+    }
+  },
+  "boundary": "Actual Source SQLite, authenticated in-process gateway RPC and controlled transport failures. Managed runtime enablement/operator finalization remain unavailable. Not a deployment or production acceptance."
+}

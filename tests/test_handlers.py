@@ -300,6 +300,44 @@ class HandlersTest(AsyncHTTPTestCase):
 
 
 
+    def test_managed_assignment_lost_reply_retry_keeps_groups_and_returns_pending(self):
+        from e2x_course_hub.cps.compute import ComputePolicyClient
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard,migrate_pool_source_guard,digest
+        from tornado.httpclient import HTTPClientError
+        client=ComputePolicyClient('https://gateway.invalid','test','cps')
+        guard=PoolMutationRPCGuard(client,database_id='11111111-1111-4111-8111-111111111111')
+        fail=[True]
+        async def rpc(path,method='GET',body=None):
+            self.assertFalse(self.provider.db.in_transaction)
+            if path.endswith('migration-permit'):return {'database_id':guard.database_id,'state':'absent'}
+            if path.endswith('/current'):return {'database_id':guard.database_id,'transition_id':'pending'}
+            if path.endswith('prepare-write'):return {'database_id':guard.database_id,'transition_id':'pending',
+                'operation':body['operation'],'input_sha256':digest(body),'receipt':None,'mutation_result':None}
+            if path.endswith('complete-write'):
+                if fail[0]:fail[0]=False;raise HTTPClientError(599)
+                return {'state':'pending','transition_id':'pending'}
+            raise AssertionError(path)
+        client._request=rpc
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('terms',{'id':'t','course_id':'c'},actor='admin')
+            for person in ('armin','mikasa'):
+                await self.provider.put('memberships',{'id':person,'person_id':person,'course_id':'c','term_id':'t'},actor='admin')
+            await migrate_pool_source_guard(self.provider,guard)
+        self.io_loop.run_sync(seed)
+        data={'id':'a','course_id':'c','term_id':'t','mode':'random','group_size':2,'seed':'42'}
+        self.assertEqual(self.fetch('/assignment',method='POST',body=json.dumps(data)).code,500)
+        original=self.io_loop.run_sync(lambda:self.provider.groups('c'))
+        retry=self.fetch('/assignment',method='POST',body=json.dumps(data))
+        self.assertEqual(retry.code,202)
+        self.assertEqual(json.loads(retry.body)['state'],'pending')
+        self.assertEqual(self.io_loop.run_sync(lambda:self.provider.groups('c')),original)
+        self.assertEqual(self.provider.db.execute('SELECT COUNT(*) FROM pool_source_receipt').fetchone()[0],1)
+        changed=self.fetch('/assignment',method='POST',body=json.dumps({**data,'group_size':1}))
+        self.assertEqual(changed.code,400)
+        self.admin=False
+        self.assertEqual(self.fetch('/assignment',method='POST',body=json.dumps(data)).code,403)
+
 from e2x_course_hub.cps.proxy import ComputeCSRFHandler
 from e2x_course_hub.cps.oauth import CPSHubOAuth
 

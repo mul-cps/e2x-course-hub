@@ -69,10 +69,20 @@ class AssignmentHandler(RecordsHandler):
             course = next((c for c in courses if c['id']==data['course_id']),None)
             if not course or course.get('source') != 'local': raise PermissionError('Local course required')
             members = [m['person_id'] for m in await provider.members(data['course_id']) if m.get('term_id')==data['term_id']]
-            groups = allocate(members,mode=data['mode'],rows=data.get('rows'),group_size=data.get('group_size'),seed=data.get('seed'))
             identifier = data['id']
             existing = await provider.list('assignments')
-            if any(a['id']==identifier for a in existing): raise ValueError('Existing assignment requires reviewed stop/reallocation; create a new assignment ID')
+            if any(a['id']==identifier for a in existing):
+                retained=await provider.retained_import('assignments',identifier) if getattr(provider,'pool_guard',None) is not None else None
+                assignment=next((item['record'] for item in retained or [] if item['kind']=='assignments' and item['record']['id']==identifier),None)
+                if assignment is None or {key:value for key,value in assignment.items() if key in allowed}!=data:
+                    raise ValueError('Existing assignment requires reviewed stop/reallocation; create a new assignment ID')
+                retry={}
+                for item in retained:retry.setdefault(item['kind'],[]).append(item['record'])
+                await provider.migrate_local(retry,actor=actor)
+                self.set_status(202)
+                self.write({'assignment':identifier,'groups':assignment['groups'],'state':'pending'})
+                return
+            groups = allocate(members,mode=data['mode'],rows=data.get('rows'),group_size=data.get('group_size'),seed=data.get('seed'))
             records = {'groups':[], 'groupings':[], 'assignments':[], 'memberships':[]}
             originals = {m['person_id']:m for m in await provider.members(data['course_id']) if m.get('term_id')==data['term_id']}
             for group,people in groups.items():
@@ -85,7 +95,10 @@ class AssignmentHandler(RecordsHandler):
             await provider.migrate_local(records,actor=actor)
         except (ValueError,KeyError,TypeError) as error: raise web.HTTPError(400,reason=str(error))
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
-        self.write({'assignment':identifier,'groups':groups})
+        if getattr(provider,'pool_guard',None) is not None:
+            self.set_status(202)
+            self.write({'assignment':identifier,'groups':groups,'state':'pending'})
+        else:self.write({'assignment':identifier,'groups':groups})
 
 default_handlers = [
     (r'/api/compute',ComputeHandler),
