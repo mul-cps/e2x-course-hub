@@ -102,6 +102,7 @@ class RecordsHandler(BaseAPIHandler):
         except PermissionError as error:
             self.settings['course_provider'].denial(actor,kind,str(data.get('id','')),data,'denied')
             raise web.HTTPError(403, reason=str(error))
+        if getattr(self.settings['course_provider'],'pool_guard',None) is not None:self.set_status(202)
         self.write(result)
 
     @web.authenticated

@@ -1,5 +1,6 @@
 """Source-neutral local course records. No Moodle client is imported or initialized."""
 from contextlib import nullcontext
+from pathlib import Path
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -26,7 +27,9 @@ class MoodleCourseProvider:
 def audited_mutation(method):
     @wraps(method)
     async def wrapped(self,*args,**kwargs):
-        try:return await method(self,*args,**kwargs)
+        try:
+            self._pool_mode_guard()
+            return await method(self,*args,**kwargs)
         except Exception as error:
             if not self._importing:
                 kind=args[0] if args and method.__name__ in ('put','delete') else method.__name__
@@ -40,13 +43,29 @@ def audited_mutation(method):
 class LocalCourseProvider:
     capabilities = frozenset({'create', 'update', 'delete'})
 
-    def __init__(self, path, console):
+    def __init__(self, path, console, *, v2_managed=False, pool_guard=None):
         if console not in ('cps', 'cit'):
             raise ValueError('console must be cps or cit')
+        if type(v2_managed) is not bool:raise ValueError('Explicit v2 management flag required')
+        if v2_managed:
+            from .pool_heads import PoolMutationRPCGuard
+            if type(pool_guard) is not PoolMutationRPCGuard or pool_guard.client.console!=console:
+                raise ValueError('Managed Source requires exact server RPC guard')
+        self.pool_guard=pool_guard if v2_managed else None
         self.console = console
         self._importing = False
-        self.db = sqlite3.connect(str(path))
+        self.db = sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True) if v2_managed else sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
+        from .pool_heads import SOURCE_SCHEMA
+        installed=dict(self.db.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'pool_source_*'"))
+        if v2_managed:
+            if installed!=SOURCE_SCHEMA or [tuple(r) for r in self.db.execute('SELECT console,origin,database_id,source_path FROM pool_source_authority')]!=[(*pool_guard.binding,str(Path(path).resolve()))]:
+                self.db.close();raise ValueError('Explicit Source custody migration required')
+            if self.db.execute('PRAGMA user_version').fetchone()[0]!=5:
+                self.db.close();raise ValueError('Matching Source database version required')
+            return
+        if installed:
+            self.db.close();raise ValueError('Persisted managed Source requires its RPC coordinator')
         if self.db.execute('PRAGMA user_version').fetchone()[0]>5:
             self.db.close()
             raise ValueError('Console database schema is newer than this application; restore matching versions')
@@ -89,6 +108,14 @@ class LocalCourseProvider:
                 self.db.execute('ALTER TABLE email_links ADD COLUMN verified INTEGER NOT NULL DEFAULT 0')
             self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS email_links_canonical ON email_links(console,canonical_person_id)')
 
+    def _pool_mode_guard(self):
+        from .pool_heads import SOURCE_SCHEMA
+        installed=dict(self.db.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'pool_source_*'"))
+        if self.pool_guard is None and installed:
+            raise ValueError('Managed Source cannot use an already-open legacy writer')
+        if self.pool_guard is not None and installed!=SOURCE_SCHEMA:
+            raise ValueError('Managed Source custody missing or corrupt')
+
     async def list(self, kind, course_id=None):
         self._kind(kind)
         rows = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? ORDER BY id', (self.console, kind))
@@ -109,6 +136,7 @@ class LocalCourseProvider:
         old = json.loads(previous['payload']) if previous else None
         # CRUD updates preserve unspecified metadata, provenance, policy and references.
         if old:record={**old,**record}
+        record=json.loads(json.dumps(record,sort_keys=True,separators=(',',':')))
         if old and kind not in ('courses','projects'):
             if any(old.get(key) != record.get(key) for key in ('course_id','term_id')):
                 raise ValueError('record course/term association is immutable; reviewed migration required')
@@ -126,13 +154,39 @@ class LocalCourseProvider:
         from .validation import validate
         record = await validate(self,kind,record)
         payload = json.dumps(record, sort_keys=True)
+        ticket=None
+        if self.pool_guard is not None:
+            if self.db.in_transaction:raise ValueError('Remote fence cannot run inside a Source transaction')
+            if previous and json.loads(previous['payload'])==record:
+                current=await self.pool_guard.client._request('native-pool-head/current')
+                if current.get('database_id')!=self.pool_guard.database_id:raise ValueError('Source custody changed')
+                receipt=self.db.execute('SELECT input_sha256,result FROM pool_source_receipt WHERE transition_id=?',(current.get('transition_id'),)).fetchone()
+                if receipt is not None:
+                    from .pool_heads import digest
+                    expected=digest({'operation':'admin.record.put','payload':{'console':self.console,'kind':kind,'record':record}})
+                    if receipt['input_sha256']!=expected or json.loads(receipt['result'])!=record:
+                        raise ValueError('Retained Source operation receipt differs')
+                    await self.pool_guard.complete({'transition_id':current['transition_id']},json.loads(receipt['result']))
+                return record
+            ticket=await self.pool_guard.prepare('admin.record.put',{'console':self.console,'kind':kind,'record':record})
         with (nullcontext() if self._importing else self.db):
+            if ticket is not None:
+                self.db.execute('BEGIN IMMEDIATE')
+                self._pool_mode_guard()
+                current=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',(self.console,kind,identifier)).fetchone()
+                if (current['payload'] if current else None)!=(previous['payload'] if previous else None):
+                    raise ValueError('Source preimage changed while admission was fenced')
             self.db.execute('INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?)', (self.console, kind, identifier, payload))
             self._audit(actor, kind, identifier, previous['payload'] if previous else None, payload)
+            if ticket is not None:
+                self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
+                                (ticket['transition_id'],ticket['input_sha256'],payload))
+        if ticket is not None:await self.pool_guard.complete(ticket,record)
         return record
 
     @audited_mutation
     async def delete(self, kind, identifier, *, actor):
+        if self.pool_guard is not None:self.pool_guard.deny_uncovered('record deletion')
         self._kind(kind)
         previous = self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?', (self.console, kind, identifier)).fetchone()
         if not previous: raise KeyError(identifier)
@@ -175,7 +229,9 @@ class LocalCourseProvider:
 
     @audited_mutation
     async def migrate_local(self, records, *, actor):
+        self._pool_mode_guard()
         """Explicit import preserves IDs and all workspace references; never match names."""
+        if self.pool_guard is not None:self.pool_guard.deny_uncovered('batch import')
         with self.db:
             self._importing = True
             try:
@@ -187,6 +243,7 @@ class LocalCourseProvider:
 
     @audited_mutation
     async def link_identities(self, rows, *, actor):
+        if self.pool_guard is not None:self.pool_guard.deny_uncovered('identity migration')
         from .identity import reviewed_email_mapping
         mapping=reviewed_email_mapping(rows)
         proofs={(row['hub'],row['username']):row for row in rows}
@@ -225,6 +282,11 @@ class LocalCourseProvider:
 
 
 def configure_provider(config, path, console):
+    settings=config.get('nativePoolHeads',{'enabled':False})
+    if type(settings) is not dict or set(settings)!={'enabled'} or type(settings['enabled']) is not bool:
+        raise ValueError('Exact default-off nativePoolHeads configuration required')
+    if settings['enabled']:
+        raise ValueError('V2 operator applicator and complete authoritative writer coverage unavailable')
     if config.get('moodle', {}).get('enabled', False):
         return MoodleCourseProvider()
     if not config.get('local', {}).get('enabled', True):

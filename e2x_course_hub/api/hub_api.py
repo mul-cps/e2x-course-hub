@@ -51,6 +51,14 @@ class HubAPI(HubOAuth):
         )
         provider = getattr(self, 'audit_provider', None)
         mutation = method in ('POST','PUT','PATCH','DELETE')
+        # Server stop/teardown remains available. Group/identity changes cannot
+        # silently invalidate the immutable v2 Source through legacy Hub APIs.
+        if provider is not None and mutation and hasattr(provider,'_pool_mode_guard'):provider._pool_mode_guard()
+        if provider is not None and getattr(provider,'pool_guard',None) is not None and mutation:
+            from urllib.parse import urlsplit
+            path=urlsplit(url).path
+            stopping=method=='DELETE' and '/users/' in path and ('/servers/' in path or path.endswith('/server'))
+            if not stopping:provider.pool_guard.deny_uncovered('legacy Hub mutation')
         snapshot_url = url
         if '/groups/' in url and url.endswith('/users'): snapshot_url = url.rsplit('/users',1)[0]
         if '/users/' in url and '/servers/' in url: snapshot_url = url.split('/servers/',1)[0]

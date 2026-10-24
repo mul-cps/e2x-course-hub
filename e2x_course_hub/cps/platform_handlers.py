@@ -32,6 +32,7 @@ class ComputeHandler(RecordsHandler):
             raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
         with provider.db:
             provider._audit(actor,'compute-grants',str(data['id']),json.dumps(previous),json.dumps(result))
+        if getattr(provider,'pool_guard',None) is not None:self.set_status(202)
         self.write(result or {})
 
 class WorkspaceHandler(RecordsHandler):
