@@ -29,7 +29,7 @@ def coordinator_base(value):
     return value
 
 
-async def private_json(url, token, *, method='GET', payload=None, factory=None, absent=False):
+async def private_json(url, token, *, method='GET', payload=None, factory=None, absent=False, paginated=False):
     """Own bounded transport, disable redirects, suppress secret-bearing failures."""
     client=None
     try:
@@ -40,8 +40,11 @@ async def private_json(url, token, *, method='GET', payload=None, factory=None, 
             body.extend(chunk)
             if len(body)>8*1024*1024:raise ValueError()
         client=(factory or AsyncHTTPClient)(force_instance=True,max_buffer_size=8*1024*1024)
+        headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}
+        if paginated:
+            headers['Accept']='application/jupyterhub-pagination+json'
         response=await client.fetch(HTTPRequest(url, method=method,
-            headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'},body=raw,
+            headers=headers,body=raw,
             follow_redirects=False,connect_timeout=5,request_timeout=20,streaming_callback=receive),
             raise_error=False)
         if response.code==404 and absent:return None

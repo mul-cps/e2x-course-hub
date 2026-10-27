@@ -107,13 +107,27 @@ class HubPermissionController:
             raise ValueError('Pinned coordinator binding changed')
         return await self.guard.client._request('native-pool-head/'+path,method,payload)
 
-    async def _hub(self,path,*,payload=None,absent=False):
+    async def _hub(self,path,*,payload=None,absent=False,paginated=False):
         self._clean()
         if self.hub_api.api_url!=self.binding.hub_api:
             raise ValueError('Pinned Hub origin changed')
         return await private_json(self.binding.hub_api+'/'+path,self.hub_api.api_token,
             method='GET' if payload is None else 'POST',payload=payload,
-            factory=self._factory,absent=absent)
+            factory=self._factory,absent=absent,paginated=paginated)
+
+    async def _unshared(self,name):
+        # JupyterHub filters expired Shares out of items, but its negotiated
+        # pagination total counts all retained Share rows, including expired ones.
+        observed=await self._hub('groups/'+quote(name,safe='')+'/shared',paginated=True)
+        page=observed.get('_pagination') if type(observed) is dict else None
+        if (type(observed) is not dict or set(observed)!={'items','_pagination'}
+            or observed['items']!=[] or type(page) is not dict
+            or set(page)!={'offset','limit','total','next'}
+            or type(page['offset']) is not int or page['offset']!=0
+            or type(page['limit']) is not int or page['limit']<1
+            or type(page['total']) is not int or page['total']!=0
+            or page['next'] is not None):
+            raise ValueError('Proven absence of all native group Share rows required')
 
     def _visitor(self,visitor):
         from ..schema.user import User
@@ -236,6 +250,7 @@ class HubPermissionController:
                 before[field]=sorted(values)
             _sdk().names(before['users']);_sdk().names(before['roles'])
             if before['roles']:raise PermissionError('Native role-bearing groups require a separate writer')
+            await self._unshared(binding['hub_group'])
             before={key:before[key] for key in ('name','users','roles')} | {'properties_sha256':digest(before['properties'])}
         if action=='group-create' and before is not None or action!='group-create' and before is None:
             raise ValueError('Hub group existence differs from action')

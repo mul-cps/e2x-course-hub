@@ -281,8 +281,11 @@ Hub Service identities, even when a Service name matches a privileged User.
 The private coordinator uses canonical credential-free HTTPS, closed paths,
 quoted identifiers, bounded transport, no redirects, and owned client closure.
 The Hub service must already have the custom permission scope plus the Hub read
-scopes needed for full user/group projections, including `read:roles:groups`.
-A missing roles field, denied GET, or timeout fails closed; only a genuine 404
+scopes needed for full user/group projections, including `read:roles:groups` and `read:groups:shares`.
+The group Share preflight negotiates JupyterHub pagination and requires a zero total,
+so expired retained Share rows also reject before a head is prepared. Missing
+Share read scope, malformed/unavailable pagination, or any retained Share fails
+closed. A missing roles field, denied GET, or timeout fails closed; only a genuine 404
 means a group is absent. This code does not grant those scopes or change native
 roles. Tokens remain private server objects and never enter browser config.
 
