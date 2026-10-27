@@ -61,6 +61,27 @@ class HandlersTest(AsyncHTTPTestCase):
         self.tmp.cleanup()
         super().tearDown()
 
+    def test_hub_group_bindings_require_fresh_administrator_and_preserve_unspecified(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'c'},actor='admin')
+        self.io_loop.run_sync(seed)
+        row={'group_id':'g','hub_group':'team','role':'student'}
+        self.groups=['lms.course.c.course-owner'];self.admin=False
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[row]})).code,403)
+        self.admin=True
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[row]})).code,200)
+        self.admin=False
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','name':'Renamed'})).code,200)
+        self.assertEqual(self.io_loop.run_sync(self.provider.courses)[0]['hub_group_bindings'],[row])
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[]})).code,403)
+        self.assertEqual(self.fetch('/records/courses',method='DELETE',body=json.dumps({'id':'c'}),
+            allow_nonstandard_methods=True).code,403)
+
     def test_two_actual_visitors_have_distinct_identity(self):
         calls=[]
         class Client:

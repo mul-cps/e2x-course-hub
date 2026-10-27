@@ -237,3 +237,89 @@ admin release with the compute gateway/addon release providing JobSet list/log
 endpoints; disabled distributed runtime remains disabled. Two-visitor proxy
 tests cover token separation and reject unsupported routes. Production OAuth
 and rendered addon qualification remain separate rollout requirements.
+
+## Managed ordinary Hub groups (opt in, software qualification only)
+
+The optional `compute` extra pins `cps-compute==0.1.0`. Managed mode requires
+Python 3.11 or later and matching compute/Hub/admin source versions. The legacy
+base package retains its Python compatibility and does not import the compute
+SDK when this feature is disabled. No installation or deployment is implied by
+these interfaces; the compatibility-group rollout and package distribution
+remain operator release gates.
+
+A console administrator can set course `hub_group_bindings` metadata as a list
+of closed `{group_id, hub_group, role}` rows. Both identifiers are canonical Hub
+names, `role` is `student` or `teaching`, and each Source group and Hub name may
+occur only once across that console's courses. The Source group must be local,
+belong to that exact course, and reference an actual local term. Course CRUD
+preserves unspecified metadata. A fresh actual Hub administrator is required
+to create, replace, clear, or delete these protected bindings. Instructors may
+operate only student bindings in their own course/term under the pinned e2x RBAC
+checker; semantic teaching/owner groups cannot be disguised as student groups,
+and semantic student groups must match the Source course and term. Teaching
+bindings and explicit group deletion require an actual Hub administrator.
+Native Hub role-bearing groups remain unsupported.
+
+Membership deltas use active Source membership rows. `person_id` is the exact
+local Hub account name already used by this Source; a `canonical_person_id`
+requires its actual verified/reviewed `email_links` row. Every active mapped
+account must exist in the same Hub. Names and email addresses are never matched
+heuristically and no users are created. Duplicate, foreign, malformed, expired,
+or not-yet-active records cannot create additional access. Teacher/owner records
+cannot enter a student binding. Creation produces an empty ordinary Hub group;
+additions and removals reconcile only the missing or stale members. No-op deltas
+return `unchanged` without preparing a head. Deletion tears down only the Hub
+group and requires no Source membership/grouping/assignment/workspace reference;
+it preserves Source records and research data. Any shared/server/assignment or
+grouping reference rejects before preparation until Task 3C qualifies the full
+stop, existing-access closure, and native-cleanup lifecycle.
+
+`HubPermissionController` accepts the existing authenticated handler `User`,
+refreshes that actual visitor from its pinned Hub, and rechecks Source, authority,
+and current time after awaits immediately before dispatch. The handler rejects
+Hub Service identities, even when a Service name matches a privileged User.
+The private coordinator uses canonical credential-free HTTPS, closed paths,
+quoted identifiers, bounded transport, no redirects, and owned client closure.
+The Hub service must already have the custom permission scope plus the Hub read
+scopes needed for full user/group projections, including `read:roles:groups`.
+A missing roles field, denied GET, or timeout fails closed; only a genuine 404
+means a group is absent. This code does not grant those scopes or change native
+roles. Tokens remain private server objects and never enter browser config.
+
+The handler installer `install_hub_permissions(app, enabled=False, ...)` is inert
+by default. Explicit enablement merges routes under the configured service
+prefix and refuses conflicting settings/routes or disabled XSRF. The routes are:
+
+- `POST /api/local/hub-groups/operations`, exactly `{group_id, action}`.
+- `POST /api/local/hub-groups/operations/<UUID>`, exactly `{input_sha256}`.
+
+Bodies are bounded, duplicate-free strict JSON with no query parameters or raw
+Hub request/actor/policy overrides. Existing Hub OAuth and XSRF protection apply.
+The response retains `operation_id` and `input_sha256` for exact recovery; server
+SQL observations and installation binding details are not returned to browsers.
+The controller persists prepared journal custody before retaining the global
+effect and armed custody before sending exactly `{effect: retained_record}` to
+the pinned Hub permission receiver. Its genuine atomic receipt completes the
+local journal/audit/Source receipt, then completes only the same still-current
+fenced global mutation. Admission remains fenced: no target, ACK, finalize, or
+next transition is performed.
+
+A lost initial prepare reply may be retried only while validated Source history
+and the exact unfinished current transition have no retained effect/completion.
+After effect retention, recover using the original UUID/hash and retained intent;
+missing local/global custody must not be reconstructed. An armed retry rechecks
+current authorization and reuses its exact effect; the Hub's original receipt
+handles a lost receiver reply without replaying a later-revoked membership.
+Completed historical recovery is available only to its original authenticated
+visitor or an actual administrator. It returns the retained receipt after later
+Source/Hub edits and cannot complete a different current head. Failed/uncertain
+responses never trigger destructive compensation.
+
+Opening an already-migrated generation-6 Source requires explicit `v2_managed`,
+the typed `PoolMutationRPCGuard`, and `SourceJournalBinding`. Construction
+validates full existing journal custody without creating tables or updating a
+version. Default/version-5 opening behavior remains unchanged and
+`configure_provider` still refuses native-pool enablement because complete
+operator/writer coverage is unavailable. Genuine installation custody and the
+one-time explicit migration remain Task 4. Paired Source/Hub/coordinator software
+tests are not full Task 3C lifecycle, live installation, or production acceptance.

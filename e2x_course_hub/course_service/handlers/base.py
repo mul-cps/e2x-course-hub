@@ -4,7 +4,7 @@ from logging import Logger
 
 from jupyterhub.services.auth import HubOAuthenticated
 from jupyterhub.utils import url_path_join as ujoin
-from tornado.web import RequestHandler
+from tornado.web import HTTPError, RequestHandler
 
 from ...api.course_api import CourseAPI
 from ...api.errors import APIError, UnauthorizedError
@@ -81,6 +81,8 @@ class BaseAPIHandler(AuditMixin, BaseHandler):
 
         if not hub_user:
             raise UnauthorizedError("No authenticated user found.")
+        if not isinstance(hub_user, dict) or hub_user.get("kind") != "user":
+            raise HTTPError(403, reason="Authenticated Hub User required")
         # This user is only set when the user logs in
         # The group memberships might not be updated if they change in JupyterHub
         # after the user has logged in

@@ -79,7 +79,7 @@ class RecordsHandler(BaseAPIHandler):
             raise web.HTTPError(400,reason='Reconciliation barriers are service-controlled')
         actor = await self.authorize_record(kind,data)
         await self.check_reconciliation_barrier(kind,data)
-        if kind=='courses' and {'resource_ceiling','workspace_bindings'} & set(data):await self.authorize()
+        if kind=='courses' and {'resource_ceiling','workspace_bindings','hub_group_bindings'} & set(data):await self.authorize()
         if kind in ('assignments','workspaces'):
             raise web.HTTPError(405,reason='Use controlled assignment/workspace lifecycle APIs')
         if kind == 'groups' and any(w.get('group_id') == data.get('id') for w in await self.settings['course_provider'].list('workspaces')):
@@ -113,6 +113,8 @@ class RecordsHandler(BaseAPIHandler):
             existing=await self.settings['course_provider'].deleted_record(kind,data.get('id'))
         if existing is None:raise web.HTTPError(404)
         actor = await self.authorize_record(kind,existing)
+        if kind=='courses' and any(key in existing for key in ('resource_ceiling','workspace_bindings','hub_group_bindings')):
+            await self.authorize()
         await self.check_reconciliation_barrier(kind,existing)
         if kind in ('assignments','workspaces','memberships'):
             raise web.HTTPError(405,reason='Membership removal requires controlled workspace stop/revoke')
