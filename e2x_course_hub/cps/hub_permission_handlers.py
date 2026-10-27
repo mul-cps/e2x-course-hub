@@ -65,7 +65,8 @@ class HubGroupOperationHandler(BaseAPIHandler):
             raise web.HTTPError(400,'Closed bounded operation body required')
         try:
             data=strict_json(self.request.body)
-            fields={'input_sha256'} if operation_id is not None else {'group_id','action'}
+            fields=({'input_sha256'} if operation_id is not None else
+                {'action','name'} if type(data) is dict and data.get('action')=='user-create' else {'group_id','action'})
             if type(data) is not dict or set(data)!=fields:
                 raise ValueError()
             if any(type(value) is not str for value in data.values()):raise ValueError()
@@ -76,7 +77,8 @@ class HubGroupOperationHandler(BaseAPIHandler):
         controller=self.settings[SETTING]
         try:
             if operation_id is None:
-                result=await controller.dispatch(visitor,data['group_id'],data['action'])
+                if data['action']=='user-create':result=await controller.create_user(visitor,data['name'])
+                else:result=await controller.dispatch(visitor,data['group_id'],data['action'])
             else:
                 result=await controller.recover(visitor,operation_id,data['input_sha256'])
         except PermissionError:

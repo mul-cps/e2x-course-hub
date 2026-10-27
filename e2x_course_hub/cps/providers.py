@@ -27,6 +27,8 @@ class MoodleCourseProvider:
 def audited_mutation(method):
     @wraps(method)
     async def wrapped(self,*args,**kwargs):
+        if getattr(self,'managed_installation',None) is not None:
+            raise ValueError('Installed Hub successor lane does not authorize Source entity changes')
         try:
             self._pool_mode_guard()
             return await method(self,*args,**kwargs)
@@ -515,12 +517,17 @@ class LocalCourseProvider:
             self.db.backup(target)
 
 
-def configure_provider(config, path, console):
+def configure_provider(config, path, console, *, managed_installation=None, pool_guard=None):
     settings=config.get('nativePoolHeads',{'enabled':False})
     if type(settings) is not dict or set(settings)!={'enabled'} or type(settings['enabled']) is not bool:
         raise ValueError('Exact default-off nativePoolHeads configuration required')
     if settings['enabled']:
-        raise ValueError('V2 operator applicator and complete authoritative writer coverage unavailable')
+        from cps_compute.native_hub_installation import ManagedHubInstallation
+        if (type(managed_installation) is not ManagedHubInstallation
+            or managed_installation.binding['console']!=console
+            or managed_installation.binding['source']['source_path']!=str(Path(path).resolve())):
+            raise ValueError('V2 operator applicator and genuine installed authority required')
+        return managed_installation.reopen_source(pool_guard)
     if config.get('moodle', {}).get('enabled', False):
         return MoodleCourseProvider()
     if not config.get('local', {}).get('enabled', True):

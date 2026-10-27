@@ -232,6 +232,32 @@ class HubPermissionController:
         if result['intent']!=record['intent']:raise ValueError('Retained effect intent changed')
         return result
 
+    async def _fresh_user(self,visitor,source):
+        if getattr(self.provider,'managed_installation',None) is None:
+            raise ValueError('Genuine installed user-creation authority required')
+        current=await self._actor(visitor)
+        self._clean()
+        if current['admin'] is not True:
+            raise PermissionError('Fresh actual console administrator required for user creation')
+        if self.journal.capture_source()!=source:
+            raise ValueError('Original Source changed during user creation')
+        return current
+
+    async def create_user(self,visitor,username):
+        _sdk().name(username)
+        source=self.journal.capture_source()
+        current=await self._fresh_user(visitor,source)
+        before=await self._hub('users/'+quote(username,safe=''),absent=True)
+        if before is not None:raise ValueError('Exact absent Hub user required; no adoption')
+        await self._fresh_user(visitor,source)
+        intent=_sdk().validate_hub_intent(dict(console=self.binding.console,actor=current['name'],
+            hub_api=self.binding.hub_api,request={'action':'user-create','name':username},before=None,
+            source_revision=digest(source)))
+        ticket=await self.guard.prepare('admin.hub',intent)
+        record=self.journal.prepare(operation_id=ticket['transition_id'],input_sha256=digest({'operation':'admin.hub','payload':intent}),
+            intent=intent,source_preimage=source,hub_preimage=None,actor=current['name'],ticket=ticket)
+        return await self._run(visitor,record,None,[])
+
     async def dispatch(self,visitor,group_id,action):
         _sdk().name(group_id)
         if action not in ACTIONS:raise ValueError('Ordinary group action required')
@@ -295,6 +321,9 @@ class HubPermissionController:
         if record['state']=='completed':
             await self._finish(record)
             return self.journal.read(operation_id,input_sha256)
+        if record['intent']['request']['action']=='user-create':
+            await self._fresh_user(visitor,record['source_preimage'])
+            return await self._run(visitor,record,None,[])
         bindings=validate_bindings(self._records('courses'),self._records('groups'),self._records('terms'),self.legacy_roles)
         group_id=next((gid for gid,(_,_,b) in bindings.items() if b['hub_group']==record['intent']['request']['name']),None)
         if group_id is None:raise ValueError('Original Source binding missing')
@@ -309,7 +338,8 @@ class HubPermissionController:
     async def _run(self,visitor,record,group_id,roster):
         op,ih=record['operation_id'],record['input_sha256']
         action=record['intent']['request']['action']
-        await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
+        if action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
+        else:await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
         status=await self._rpc('current')
         expected=record['effect_sha256']
         if record['state']=='prepared':
@@ -325,7 +355,8 @@ class HubPermissionController:
             effect=self._effect(await self._rpc('hub-effects/read','POST',{'transition_id':op,'intent':record['intent']}),record)
             if effect!=record['effect'] or digest(effect)!=expected:raise ValueError('Original effect custody required')
         # Last awaited authority observation, then synchronous time/Source checks.
-        await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
+        if action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
+        else:await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
         receipt=await self._hub('cps/permission-operations/'+op,payload={'effect':record['effect']})
         # Genuine atomic receiver receipt is the only completion evidence.
         record=self.journal.complete(op,ih,receipt=receipt)

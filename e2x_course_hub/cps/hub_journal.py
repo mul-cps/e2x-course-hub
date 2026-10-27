@@ -22,7 +22,7 @@ SOURCE_JOURNAL_SCHEMA = {
     'hub_journal_authority': 'CREATE TABLE hub_journal_authority(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL CHECK(version=1),binding TEXT NOT NULL,manifest TEXT NOT NULL)',
     'hub_journal_operation': 'CREATE TABLE hub_journal_operation(operation_id TEXT PRIMARY KEY,input_sha256 TEXT NOT NULL,state TEXT NOT NULL,record TEXT NOT NULL)',
 }
-_GROUP_ACTIONS = frozenset(('group-create', 'group-users-add', 'group-users-remove', 'group-delete'))
+_GROUP_ACTIONS = frozenset(('user-create', 'group-create', 'group-users-add', 'group-users-remove', 'group-delete'))
 _EFFECT_BOUND = 4 * 1024 * 1024
 _RECEIPT_BOUND = 8 * 1024 * 1024
 _SOURCE_COLUMNS = {
@@ -147,12 +147,20 @@ class SourceHubJournal:
         # Outside try: never commit OR roll back a caller's pending transaction.
         if db.in_transaction:
             raise ValueError('Source Hub journal requires a clean connection')
+        installation=getattr(self.provider,'managed_installation',None)
+        if installation is not None:installation.check_source(self.provider)
+        from cps_compute.native_pool_activation import _snapshot
+        before=_snapshot(db) if installation is not None and write else None
         started = False
         try:
             db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
             started = True
             yield
+            after=_snapshot(db) if before is not None else None
+            successor=(installation.stage_source(self,before,after)
+                if before is not None and before!=after else None)
             db.commit()
+            if successor is not None:installation.finish(successor)
         except Exception:
             if started:
                 db.rollback()
@@ -238,7 +246,13 @@ class SourceHubJournal:
                  and all(value[key] == expected for key, expected in context.items()))
         request, before = intent['request'], intent['before']
         action = request['action']
-        if action == 'group-create':
+        if action == 'user-create':
+            after=value.get('result',{}).get('after')
+            _require(type(after) is dict and set(after)=={'id','name','created','admin','roles','groups'}
+                and type(after['id']) is int and after['id']>0 and after['name']==request['name']
+                and type(after['created']) is str and after['created'] and after['admin'] is False
+                and after['roles']==['user'] and after['groups']==[])
+        elif action == 'group-create':
             after = dict(name=request['name'], users=[], roles=[], properties_sha256=_hash({}))
         elif action == 'group-delete':
             after = None
