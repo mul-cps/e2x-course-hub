@@ -27,13 +27,16 @@ class MoodleCourseProvider:
 def audited_mutation(method):
     @wraps(method)
     async def wrapped(self,*args,**kwargs):
-        if getattr(self,'managed_installation',None) is not None:
-            raise ValueError('Installed Hub successor lane does not authorize Source entity changes')
+        custody=getattr(self,'managed_installation',None)
+        if custody is not None:
+            if method.__name__!='put':
+                raise ValueError('Installed Hub successor lane does not authorize this Source entity change')
+            custody.check_source(self)
         try:
             self._pool_mode_guard()
             return await method(self,*args,**kwargs)
         except Exception as error:
-            if not self._importing:
+            if not self._importing and custody is None:
                 kind=args[0] if args and method.__name__ in ('put','delete') else method.__name__
                 proposed=args[1] if len(args)>1 else args[0] if args else {}
                 identifier=proposed.get('id','') if isinstance(proposed,dict) else str(proposed) if method.__name__=='delete' else ''
@@ -210,6 +213,8 @@ class LocalCourseProvider:
                     await self.pool_guard.complete({'transition_id':current['transition_id']},json.loads(receipt['result']))
                 return record
             ticket=await self.pool_guard.prepare('admin.record.put',{'console':self.console,'kind':kind,'record':record})
+        custody=getattr(self,'managed_installation',None)
+        successor=None
         with (nullcontext() if self._importing else self.db):
             if ticket is not None:
                 self.db.execute('BEGIN IMMEDIATE')
@@ -217,11 +222,18 @@ class LocalCourseProvider:
                 current=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',(self.console,kind,identifier)).fetchone()
                 if (current['payload'] if current else None)!=(previous['payload'] if previous else None):
                     raise ValueError('Source preimage changed while admission was fenced')
+            if custody is not None:
+                custody.check_source(self)
+                from cps_compute.native_pool_activation import _snapshot
+                retained_before=_snapshot(self.db)
             self.db.execute('INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?)', (self.console, kind, identifier, payload))
             self._audit(actor, kind, identifier, previous['payload'] if previous else None, payload)
             if ticket is not None:
                 self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
                                 (ticket['transition_id'],ticket['input_sha256'],payload))
+            if custody is not None:
+                successor=custody.stage_source_entity(self,retained_before,ticket,kind,record,actor)
+        if successor is not None:custody.finish(successor)
         if ticket is not None:await self.pool_guard.complete(ticket,record)
         return record
 
