@@ -89,7 +89,7 @@ def _intent(value):
     # Lazy: the existing compute SDK is an integration dependency of Task 3B.
     from cps_compute.native_pool_hub_effects import validate_hub_intent
     result = validate_hub_intent(value)
-    _require(result['request']['action'] in _GROUP_ACTIONS)
+    _require(result['request']['action'] in _GROUP_ACTIONS | {'workspace-account-create'})
     return result
 
 
@@ -246,7 +246,12 @@ class SourceHubJournal:
                  and all(value[key] == expected for key, expected in context.items()))
         request, before = intent['request'], intent['before']
         action = request['action']
-        if action == 'user-create':
+        if action == 'workspace-account-create':
+            from cps_compute.native_pool_neutral_effects import validate_neutral_after
+            after=validate_neutral_after(intent['console'],request['descriptor'],value.get('result',{}).get('after'))
+            _require(after['authority']==before['authority'] and
+                (before['course_group'] is None or after['course_group']==before['course_group']))
+        elif action == 'user-create':
             after=value.get('result',{}).get('after')
             _require(type(after) is dict and set(after)=={'id','name','created','admin','roles','groups'}
                 and type(after['id']) is int and after['id']>0 and after['name']==request['name']
@@ -268,7 +273,8 @@ class SourceHubJournal:
 
     def _audit(self, record):
         return (record['actor'], self._binding['console'], 'admin.hub',
-                record['intent']['request']['name'], _json(record['hub_preimage']),
+                (record['intent']['request']['binding']['owner'] if record['intent']['request']['action']=='workspace-account-create'
+                 else record['intent']['request']['name']), _json(record['hub_preimage']),
                 _json(record['receipt']), record['audit_time'], 'success')
 
     def _validate(self):

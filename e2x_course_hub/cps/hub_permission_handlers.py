@@ -66,6 +66,7 @@ class HubGroupOperationHandler(BaseAPIHandler):
         try:
             data=strict_json(self.request.body)
             fields=({'input_sha256'} if operation_id is not None else
+                {'action','workspace'} if type(data) is dict and data.get('action') in ('workspace-account-create','workspace-prepare') else
                 {'action','name'} if type(data) is dict and data.get('action')=='user-create' else {'group_id','action'})
             if type(data) is not dict or set(data)!=fields:
                 raise ValueError()
@@ -77,7 +78,12 @@ class HubGroupOperationHandler(BaseAPIHandler):
         controller=self.settings[SETTING]
         try:
             if operation_id is None:
-                if data['action']=='user-create':result=await controller.create_user(visitor,data['name'])
+                if data['action']=='workspace-prepare':
+                    service=self.settings.get('workspace_service')
+                    if service is None:raise ValueError('Workspace service unavailable')
+                    result=await service.prepare_native_approval(data['workspace'],visitor=visitor)
+                elif data['action']=='workspace-account-create':result=await controller.create_workspace_account(visitor,data['workspace'])
+                elif data['action']=='user-create':result=await controller.create_user(visitor,data['name'])
                 else:result=await controller.dispatch(visitor,data['group_id'],data['action'])
             else:
                 result=await controller.recover(visitor,operation_id,data['input_sha256'])
@@ -86,7 +92,7 @@ class HubGroupOperationHandler(BaseAPIHandler):
         except (ValueError,KeyError,TypeError):
             raise web.HTTPError(409,'Permission operation unavailable or conflicted; retain exact recovery context') from None
         # Do not expose retained SQL observations or server installation metadata.
-        response={key:result[key] for key in ('state','operation_id','input_sha256','receipt') if key in result}
+        response={key:result[key] for key in ('state','operation_id','input_sha256','receipt','phase','workspace','account_operation','account_input_sha256') if key in result}
         self.set_header('Cache-Control','no-store')
         self.set_status(200 if result['state']=='unchanged' else 202)
         self.write(response)
@@ -120,7 +126,15 @@ def install_hub_permissions(app, *, enabled=False, controller=None, service_pref
                 for probe in (path,path+'/11111111-1111-4111-8111-111111111111')):
                 raise ValueError('Conflicting permission handler')
             if hasattr(rule.target,'rules'):pending.append(rule.target)
+    service=app.settings.get('workspace_service')
+    if service is not None:
+        from .accounts import WorkspaceAccountAdapter,CentralWorkspaceFilesystemAdapter
+        if service.provider is not controller.provider or service.compute is not controller.guard.client:
+            raise ValueError('Exact managed workspace service binding required')
     app.add_handlers(r'.*$',[(re.escape(path),HubGroupOperationHandler),
         (re.escape(path)+r'/([^/]+)',HubGroupOperationHandler)])
     app.settings[SETTING]=controller
+    if service is not None:
+        service.accounts=WorkspaceAccountAdapter(controller)
+        service.filesystem=CentralWorkspaceFilesystemAdapter(service.compute)
     return controller

@@ -103,11 +103,12 @@ class UnconfiguredFilesystemAdapter:
 
 
 class WorkspaceService:
-    def __init__(self, provider, compute, hub, *, filesystem=None):
+    def __init__(self, provider, compute, hub, *, filesystem=None, accounts=None):
         self.provider, self.compute, self.hub = provider,compute,hub
         self.locks = {}
         self.course_locks = {}
         self.filesystem = filesystem or UnconfiguredFilesystemAdapter()
+        self.accounts = accounts
 
     async def get(self, identifier):
         for record in await self.provider.list('workspaces'):
@@ -153,9 +154,83 @@ class WorkspaceService:
         await self.compute.validate_workspace(data['id'],members,data['profile'],data['course_ceiling'])
         return await self.provider.put('workspaces',{**data,'state':'stopped'},actor=actor)
 
+    async def prepare_native_approval(self, identifier, *, visitor):
+        """Stopped CPU bootstrap, one existing managed writer phase per head handoff."""
+        from .accounts import WorkspaceAccountAdapter,CentralWorkspaceFilesystemAdapter
+        if (type(self.accounts) is not WorkspaceAccountAdapter or self.accounts.controller.provider is not self.provider
+                or self.accounts.controller.guard.client is not self.compute
+                or type(self.filesystem) is not CentralWorkspaceFilesystemAdapter or self.filesystem.compute is not self.compute):
+            raise ValueError('Installed managed account and central storage adapters required')
+        async with self.locks.setdefault(identifier,asyncio.Lock()):
+            controller=self.accounts.controller
+            original=await self.get(identifier)
+            request=controller._neutral_source(identifier)
+            source=controller.journal.capture_source()
+            current=await controller._fresh_neutral(visitor,source,request)
+            workspace=dict(original,namespace=request['descriptor']['namespace'],pod=request['descriptor']['pod'])
+            profiles=await self.compute._request('profiles')
+            profile=profiles.get(workspace['profile']) if type(profiles) is dict else None
+            gpu=profile.get('gpu') if type(profile) is dict else None
+            if (not profile or profile.get('enabled') is not True or profile.get('kind')!='interactive'
+                    or not (type(gpu) is dict and gpu.get('mode')=='none' or type(gpu) in (int,str) and str(gpu)=='0')):
+                raise ValueError('Enabled interactive CPU profile required')
+            members=await self.members(workspace)
+            validation=await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'])
+            account=await self.accounts.ensure(workspace,visitor=visitor)
+            pending=lambda phase:dict(state='awaiting-head-handoff',phase=phase,workspace=identifier,
+                account_operation=account['operation_id'],account_input_sha256=account['input_sha256'])
+            head=await self.accounts.head()
+            recovering=None
+            if head.get('state')!='active':
+                row=head.get('transition') or {}
+                if head.get('transition_id')==account['operation_id']:return pending('account')
+                if (head.get('state')!='fenced' or row.get('actor')!=controller.binding.writer_actor
+                        or row.get('instance')!=controller.binding.writer_instance
+                        or row.get('operation') not in ('control.workspace','control.storage')
+                        or row.get('target') is not None or row.get('receipt') is not None):
+                    raise ValueError('Unrelated or already targeted head requires operator handoff')
+                recovering=row['operation']
+
+            await controller._fresh_neutral(visitor,source,request)
+            await self.hub.assert_stopped(workspace)
+            registered=await self.compute.workspace_registration(identifier)
+            if registered is None:
+                if recovering is not None:raise ValueError('Original registered workspace required for recovery')
+                await controller._fresh_neutral(visitor,source,request)
+                await self.compute.register_workspace(workspace,members,validation)
+                return pending('registration')
+            expected=dict(workspace=identifier,owner=workspace['hub_user'],server=workspace['hub_server'],members=members,
+                principal='workspace:'+controller.binding.console+':'+identifier,profiles=[workspace['profile']],
+                ceiling=workspace['course_ceiling'],namespace=workspace['namespace'],pod=workspace['pod'],
+                group_id=workspace['group_id'],course_id=workspace['course_id'],term_id=workspace['term_id'],policy_hash=validation['policy_hash'])
+            if any(registered.get(k)!=v for k,v in expected.items()):
+                raise ValueError('Original exact CPU registration required; no automatic reconfiguration')
+            if recovering=='control.workspace':
+                # Existing RPC validates the exact original input/receipt before
+                # completing a lost response; it never creates a new transition.
+                await controller._fresh_neutral(visitor,source,request)
+                await self.compute.register_workspace(workspace,members,validation)
+                return pending('registration')
+            if not registered.get('storage') or recovering=='control.storage':
+                await controller._fresh_neutral(visitor,source,request)
+                reservation=await self.compute.reservation_state(identifier)
+                if reservation.get('active') is not False or reservation.get('attempt') is not None:
+                    raise ValueError('Observed inactive CPU workspace required')
+                await controller._fresh_neutral(visitor,source,request)
+                await self.filesystem.provision(workspace,actor=current['name'])
+                return pending('storage')
+            storage=registered['storage']
+            if storage.get('namespace')!=workspace['namespace'] or not storage.get('pvc') or storage.get('state')!='active':
+                raise ValueError('Actual owned central PVC receipt required')
+            await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registered)
+            await controller._fresh_neutral(visitor,source,request)
+            return dict(state='prepared',workspace=identifier,registration=registered,account_receipt=account['receipt'])
+
     @audited_lifecycle
     @course_serialized
     async def start(self, identifier, *, actor):
+        if getattr(self.provider,'pool_guard',None) is not None:
+            self.provider.pool_guard.deny_uncovered('Managed shared Start awaits full Task3C lifecycle')
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
             if workspace.get('state','stopped') != 'stopped':

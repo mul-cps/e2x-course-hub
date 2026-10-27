@@ -258,6 +258,72 @@ class HubPermissionController:
             intent=intent,source_preimage=source,hub_preimage=None,actor=current['name'],ticket=ticket)
         return await self._run(visitor,record,None,[])
 
+    def _neutral_source(self, identifier):
+        from cps_compute.native_pool_neutral_effects import descriptor
+        from .expiry import active
+        workspace=next((w for w in self._records('workspaces') if w['id']==identifier),None)
+        if not workspace or workspace.get('source')!='local' or workspace.get('external_id') is not None:
+            raise PermissionError('Actual owned local workspace required')
+        if workspace.get('state','stopped')!='stopped' or workspace.get('archived') or workspace.get('archive_pending'):
+            raise ValueError('Stopped writable workspace required')
+        course=next((c for c in self._records('courses') if c['id']==workspace['course_id']),None)
+        group=next((g for g in self._records('groups') if g['id']==workspace['group_id']),None)
+        term=next((t for t in self._records('terms') if t['id']==workspace.get('term_id')),None)
+        if (not course or not group or not term or any(r.get('source')!='local' or r.get('external_id') is not None for r in (course,group,term))
+                or group.get('course_id')!=course['id'] or term.get('course_id')!=course['id']
+                or group.get('term_id')!=term['id'] or course.get('reconciliation_pending')
+                or course.get('resource_ceiling')!=workspace.get('course_ceiling')):
+            raise PermissionError('Exact owned course/term/group and ceiling required')
+        matches=[b for b in course.get('workspace_bindings',[]) if all(b.get(k)==workspace.get(k) for k in ('group_id','hub_user','hub_server'))]
+        if len(matches)!=1:raise PermissionError('Exact retained neutral workspace binding required')
+        binding=matches[0]
+        body=dict(workspace=identifier,course=course['id'],term=term['id'],group=group['id'],server=workspace['hub_server'],
+            namespace=binding.get('namespace'),pod=binding.get('pod'))
+        owner=descriptor(self.binding.console,body)
+        if owner!=workspace['hub_user'] or any(workspace.get(k) not in (None,binding.get(k)) for k in ('namespace','pod')):
+            raise PermissionError('Computed genuine owner and exact Pod binding required')
+        members=[]
+        for row in self._records('memberships'):
+            if row.get('group_id')!=group['id'] or not active(row):continue
+            if row.get('course_id')!=course['id'] or row.get('term_id')!=term['id'] or row.get('source')!='local':
+                raise PermissionError('Owned local active membership required')
+            linked=self.provider.db.execute('SELECT canonical_person_id,verified FROM email_links WHERE console=? AND username=?',
+                (self.binding.console,row['person_id'])).fetchone()
+            if linked is None or tuple(linked)!=(row.get('canonical_person_id'),1):
+                raise ValueError('Existing verified canonical membership required')
+            members.append(row['canonical_person_id'])
+        if not members:raise ValueError('Nonempty verified canonical roster required')
+        return dict(action='workspace-account-create',descriptor=body,binding=dict(source='local',owner=owner,canonical_members=sorted(set(members))))
+
+    async def _fresh_neutral(self, visitor, source, request):
+        current=await self._fresh_user(visitor,source)
+        if self._neutral_source(request['descriptor']['workspace'])!=request:
+            raise ValueError('Original neutral workspace authority changed')
+        return current
+
+    async def create_workspace_account(self, visitor, identifier):
+        _sdk().name(identifier)
+        source=self.journal.capture_source();request=self._neutral_source(identifier)
+        current=await self._fresh_neutral(visitor,source,request)
+        # Retained original operations, including lost responses, are never replaced.
+        for op,ih in self.provider.db.execute('SELECT operation_id,input_sha256 FROM hub_journal_operation ORDER BY operation_id').fetchall():
+            original=self.journal.read(op,ih)
+            if original['intent']['request'].get('action')=='workspace-account-create' and original['intent']['request']['descriptor']['workspace']==identifier:
+                if original['intent']['request']!=request:raise ValueError('Original account binding differs')
+                return await self.recover(visitor,op,ih)
+        before=await self._hub('cps/workspace-account-preimage',payload=request['descriptor'])
+        await self._fresh_neutral(visitor,source,request)
+        intent=_sdk().validate_hub_intent(dict(console=self.binding.console,actor=current['name'],hub_api=self.binding.hub_api,
+            request=request,before=before,source_revision=digest(source)))
+        ticket=await self.guard.prepare('admin.hub',intent)
+        record=self.journal.prepare(operation_id=ticket['transition_id'],input_sha256=digest({'operation':'admin.hub','payload':intent}),
+            intent=intent,source_preimage=source,hub_preimage=before,actor=current['name'],ticket=ticket)
+        return await self._run(visitor,record,None,[])
+
+    async def _verify_neutral_record(self, record):
+        receipt=await self._hub('cps/permission-operations/'+record['operation_id'],payload={'effect':record['effect']})
+        if receipt!=record['receipt']:raise ValueError('Original permanent neutral receipt changed')
+
     async def dispatch(self,visitor,group_id,action):
         _sdk().name(group_id)
         if action not in ACTIONS:raise ValueError('Ordinary group action required')
@@ -319,8 +385,14 @@ class HubPermissionController:
         if current['name']!=record['actor'] and not current['admin']:
             raise PermissionError('Original visitor or actual console administrator required')
         if record['state']=='completed':
+            if record['intent']['request']['action']=='workspace-account-create':
+                await self._fresh_neutral(visitor,record['source_preimage'],record['intent']['request'])
+                await self._verify_neutral_record(record)
             await self._finish(record)
             return self.journal.read(operation_id,input_sha256)
+        if record['intent']['request']['action']=='workspace-account-create':
+            await self._fresh_neutral(visitor,record['source_preimage'],record['intent']['request'])
+            return await self._run(visitor,record,None,[])
         if record['intent']['request']['action']=='user-create':
             await self._fresh_user(visitor,record['source_preimage'])
             return await self._run(visitor,record,None,[])
@@ -338,7 +410,8 @@ class HubPermissionController:
     async def _run(self,visitor,record,group_id,roster):
         op,ih=record['operation_id'],record['input_sha256']
         action=record['intent']['request']['action']
-        if action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
+        if action=='workspace-account-create':await self._fresh_neutral(visitor,record['source_preimage'],record['intent']['request'])
+        elif action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
         else:await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
         status=await self._rpc('current')
         expected=record['effect_sha256']
@@ -355,7 +428,8 @@ class HubPermissionController:
             effect=self._effect(await self._rpc('hub-effects/read','POST',{'transition_id':op,'intent':record['intent']}),record)
             if effect!=record['effect'] or digest(effect)!=expected:raise ValueError('Original effect custody required')
         # Last awaited authority observation, then synchronous time/Source checks.
-        if action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
+        if action=='workspace-account-create':await self._fresh_neutral(visitor,record['source_preimage'],record['intent']['request'])
+        elif action=='user-create':await self._fresh_user(visitor,record['source_preimage'])
         else:await self._fresh(visitor,group_id,action,record['source_preimage'],roster)
         receipt=await self._hub('cps/permission-operations/'+op,payload={'effect':record['effect']})
         # Genuine atomic receiver receipt is the only completion evidence.
@@ -368,6 +442,13 @@ class HubPermissionController:
         status=self._head(await self._rpc('current'))
         if status.get('transition_id')!=op:
             # Historical receipt cannot act on a later current head.
+            return
+        if record['intent']['request']['action']=='workspace-account-create' and status.get('state')=='active':
+            row=status.get('transition',{})
+            if (row.get('mutation_result')!=digest({'receipt':record['receipt']})
+                    or row.get('effect_sha256')!=record['effect_sha256'] or row.get('target') is None or row.get('receipt') is None
+                    or any(row.get(k)!=record['ticket'][k] for k in ('transition_id','operation','input_sha256','actor','instance','predecessor'))):
+                raise ValueError('Original finalized neutral transition required')
             return
         row=self._head(status,operation_id=op,input_sha256=ih,effect_sha256=record['effect_sha256'],allow_completed=True,ticket=record['ticket'])
         effect=self._effect(await self._rpc('hub-effects/read','POST',{'transition_id':op,'intent':record['intent']}),record)

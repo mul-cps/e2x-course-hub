@@ -68,8 +68,8 @@ class ComputePolicyClient:
         self.console=console
         self._http_client_factory=http_client_factory
 
-    async def _request(self,path,method='GET',payload=None):
-        fixed={('profiles','GET'),('grants','PUT'),('workspaces','PUT'),('reservations/release','POST'),
+    async def _request(self,path,method='GET',payload=None,*,absent=False):
+        fixed={('profiles','GET'),('grants','PUT'),('workspaces','PUT'),('workspaces/provision','POST'),('reservations/release','POST'),
             ('workspace-policy/preview','POST'),('workspace-policy','POST'),
             ('native-pool-head/current','GET'),('native-pool-head/migration-permit','GET'),
             ('native-pool-head/prepare-write','POST'),('native-pool-head/complete-write','POST'),
@@ -77,14 +77,16 @@ class ComputePolicyClient:
         dynamic=False
         if type(path) is str and method=='GET':
             pieces=path.split('/')
-            if len(pieces)==2 and pieces[0] in ('grants','reservations'):
+            if len(pieces)==2 and pieces[0] in ('grants','reservations','workspaces'):
                 part=pieces[1]
                 decoded=unquote(part,errors='strict')
                 dynamic=bool(decoded) and decoded not in ('.','..') and quote(decoded,safe='')==part
         if not dynamic and (path,method) not in fixed:
             raise ValueError('Closed internal policy path required')
+        if absent and not (dynamic and pieces[0]=='workspaces'):
+            raise ValueError('Absence applies only to exact workspace lookup')
         return await private_json(self.base_url+'/internal/v1/'+path,self.token,
-            method=method,payload=payload,factory=self._http_client_factory)
+            method=method,payload=payload,factory=self._http_client_factory,absent=absent)
 
     async def grants(self, person):
         return await self._request('grants/' + quote(person, safe=''))
@@ -94,6 +96,12 @@ class ComputePolicyClient:
             raise PermissionError('console cannot mutate another console grant')
         payload = {key: value for key, value in grant.items() if key != 'source'}
         return await self._request('grants', 'PUT', payload)
+
+    async def workspace_registration(self, workspace):
+        return await self._request('workspaces/'+quote(workspace,safe=''),absent=True)
+
+    async def provision_workspace(self, workspace):
+        return await self._request('workspaces/provision','POST',{'workspace':workspace})
 
     async def register_workspace(self, workspace, members, validation):
         required = ('namespace', 'pod')
@@ -106,7 +114,8 @@ class ComputePolicyClient:
             'profiles': [workspace['profile']], 'ceiling': workspace['course_ceiling'],
             'namespace': workspace['namespace'], 'pod': workspace['pod'],
             'policy_hash': validation['policy_hash'],
-            **({'group_id': workspace['group_id']} if 'group_id' in workspace else {})})
+            **({'group_id': workspace['group_id']} if 'group_id' in workspace else {}),
+            **({'course_id':workspace['course_id'],'term_id':workspace['term_id']} if workspace.get('term_id') else {})})
 
     async def reservation_state(self, workspace):
         return await self._request("reservations/" + quote(workspace, safe=""))
