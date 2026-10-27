@@ -93,9 +93,12 @@ class HubAPI(HubOAuth):
             ) is not None
             if not stopping:provider.pool_guard.deny_uncovered('legacy Hub mutation')
         snapshot_url = url
-        if '/groups/' in url and url.endswith('/users'): snapshot_url = url.rsplit('/users',1)[0]
-        if '/users/' in url and '/servers/' in url: snapshot_url = url.split('/servers/',1)[0]
+        if re.fullmatch(r'groups/[^/]+/users', path):
+            snapshot_url = ujoin(self.api_url, path.rsplit('/users', 1)[0])
+        elif re.fullmatch(r'users/[^/]+/servers/[^/]+', path):
+            snapshot_url = ujoin(self.api_url, path.rsplit('/servers/', 1)[0])
         async def snapshot():
+            self._request_path(snapshot_url)
             try:
                 response = await self.client.fetch(HTTPRequest(snapshot_url,headers=self.auth_header, follow_redirects=False))
                 return json.loads(response.body) if response.body else None

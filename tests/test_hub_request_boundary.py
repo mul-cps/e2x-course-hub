@@ -77,3 +77,19 @@ class HubRequestBoundaryTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'uncovered'):
             await hub.request('https://hub.example/hub/api/groups/g', method='post', body='{}')
         hub.client.fetch.assert_not_awaited()
+
+    async def test_audit_snapshots_preserve_custom_api_prefix(self):
+        prefix = 'https://hub.example/users/service/servers/console/hub/api'
+        hub = self.hub()
+        hub.api_url = prefix
+        db = sqlite3.connect(':memory:')
+        db.execute('CREATE TABLE audit(actor, console, action, target, previous, current, time, outcome)')
+        hub.audit_provider = SimpleNamespace(console='cps', db=db)
+        try:
+            await hub.request(prefix+'/users/alice/servers/team-1', method='DELETE')
+            urls = [call.args[0].url for call in hub.client.fetch.call_args_list]
+            self.assertEqual(urls, [prefix+'/users/alice',
+                                   prefix+'/users/alice/servers/team-1',
+                                   prefix+'/users/alice'])
+        finally:
+            db.close()
