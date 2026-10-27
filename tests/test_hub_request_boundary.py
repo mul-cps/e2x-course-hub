@@ -25,6 +25,7 @@ class HubRequestBoundaryTest(unittest.IsolatedAsyncioTestCase):
             'https://hub.example/hub/api/%2e%2e/users/alice/server',
             'https://hub.example/hub/api/users/alice/server#fragment',
             'https://hub.example/hub/api/users/alice%2f..%2fgroups/g',
+            'https://hub.example/hub/api/groups/study%0agroup',
         ]
         for url in urls:
             with self.subTest(url=url):
@@ -93,3 +94,11 @@ class HubRequestBoundaryTest(unittest.IsolatedAsyncioTestCase):
                                    prefix+'/users/alice'])
         finally:
             db.close()
+
+    async def test_percent_encoded_spaces_remain_valid_name_characters(self):
+        # The shared Hub intent codec permits internal spaces in existing names.
+        # Quoting such a name must not make it fail the destination boundary.
+        hub = self.hub()
+        url = 'https://hub.example/hub/api/groups/study%20group'
+        await hub.request(url)
+        self.assertEqual(hub.client.fetch.call_args.args[0].url, url)

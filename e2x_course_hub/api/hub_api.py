@@ -54,7 +54,7 @@ class HubAPI(HubOAuth):
             for segment in target.path.split('/'):
                 decoded = unquote(segment, errors='strict')
                 if (decoded in ('.', '..') or any(c in decoded for c in '/\\%')
-                        or any(ord(c) <= 32 or ord(c) == 127 for c in decoded)):
+                        or any(ord(c) < 32 or ord(c) == 127 for c in decoded)):
                     raise ValueError('ambiguous API path')
             if any(ord(c) <= 32 or ord(c) == 127 for c in url):
                 raise ValueError('invalid URL characters')
