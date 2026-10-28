@@ -27,11 +27,16 @@ class MoodleCourseProvider:
 def audited_mutation(method):
     @wraps(method)
     async def wrapped(self,*args,**kwargs):
+        custody=getattr(self,'managed_installation',None)
+        if custody is not None:
+            if method.__name__!='put':
+                raise ValueError('Installed Hub successor lane does not authorize this Source entity change')
+            custody.check_source(self)
         try:
             self._pool_mode_guard()
             return await method(self,*args,**kwargs)
         except Exception as error:
-            if not self._importing:
+            if not self._importing and custody is None:
                 kind=args[0] if args and method.__name__ in ('put','delete') else method.__name__
                 proposed=args[1] if len(args)>1 else args[0] if args else {}
                 identifier=proposed.get('id','') if isinstance(proposed,dict) else str(proposed) if method.__name__=='delete' else ''
@@ -43,7 +48,7 @@ def audited_mutation(method):
 class LocalCourseProvider:
     capabilities = frozenset({'create', 'update', 'delete'})
 
-    def __init__(self, path, console, *, v2_managed=False, pool_guard=None):
+    def __init__(self, path, console, *, v2_managed=False, pool_guard=None, journal_binding=None):
         if console not in ('cps', 'cit'):
             raise ValueError('console must be cps or cit')
         if type(v2_managed) is not bool:raise ValueError('Explicit v2 management flag required')
@@ -51,6 +56,9 @@ class LocalCourseProvider:
             from .pool_heads import PoolMutationRPCGuard
             if type(pool_guard) is not PoolMutationRPCGuard or pool_guard.client.console!=console:
                 raise ValueError('Managed Source requires exact server RPC guard')
+        if journal_binding is not None and not v2_managed:
+            raise ValueError('Journal binding requires explicit managed Source opening')
+        self.hub_journal = None
         self.pool_guard=pool_guard if v2_managed else None
         self.console = console
         self._importing = False
@@ -61,6 +69,23 @@ class LocalCourseProvider:
         if v2_managed:
             if installed!=SOURCE_SCHEMA or [tuple(r) for r in self.db.execute('SELECT console,origin,database_id,source_path FROM pool_source_authority')]!=[(*pool_guard.binding,str(Path(path).resolve()))]:
                 self.db.close();raise ValueError('Explicit Source custody migration required')
+            if journal_binding is not None:
+                from dataclasses import asdict
+                from .hub_permissions import SourceJournalBinding, _sdk
+                try:
+                    _sdk()
+                except ValueError:
+                    self.db.close()
+                    raise
+                from .hub_journal import SourceHubJournal
+                try:
+                    if type(journal_binding) is not SourceJournalBinding:
+                        raise ValueError('Typed Source journal binding required')
+                    self.hub_journal=SourceHubJournal(self, **asdict(journal_binding))
+                except Exception:
+                    self.db.close()
+                    raise ValueError('Matching retained Source journal custody required') from None
+                return
             if self.db.execute('PRAGMA user_version').fetchone()[0]!=5:
                 self.db.close();raise ValueError('Matching Source database version required')
             return
@@ -160,6 +185,11 @@ class LocalCourseProvider:
             if not exists: raise ValueError('course reference does not exist in this console')
         from .validation import validate
         record = await validate(self,kind,record)
+        if kind == 'courses' and 'hub_group_bindings' in record:
+            from .hub_permissions import validate_bindings
+            courses = await self.courses()
+            courses = [c for c in courses if c['id'] != record['id']] + [record]
+            validate_bindings(courses, await self.list('groups'), await self.list('terms'))
         return record, previous['payload'] if previous else None
 
     @audited_mutation
@@ -183,6 +213,8 @@ class LocalCourseProvider:
                     await self.pool_guard.complete({'transition_id':current['transition_id']},json.loads(receipt['result']))
                 return record
             ticket=await self.pool_guard.prepare('admin.record.put',{'console':self.console,'kind':kind,'record':record})
+        custody=getattr(self,'managed_installation',None)
+        successor=None
         with (nullcontext() if self._importing else self.db):
             if ticket is not None:
                 self.db.execute('BEGIN IMMEDIATE')
@@ -190,11 +222,18 @@ class LocalCourseProvider:
                 current=self.db.execute('SELECT payload FROM records WHERE console=? AND kind=? AND id=?',(self.console,kind,identifier)).fetchone()
                 if (current['payload'] if current else None)!=(previous['payload'] if previous else None):
                     raise ValueError('Source preimage changed while admission was fenced')
+            if custody is not None:
+                custody.check_source(self)
+                from cps_compute.native_pool_activation import _snapshot
+                retained_before=_snapshot(self.db)
             self.db.execute('INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?)', (self.console, kind, identifier, payload))
             self._audit(actor, kind, identifier, previous['payload'] if previous else None, payload)
             if ticket is not None:
                 self.db.execute('INSERT INTO pool_source_receipt VALUES(?,?,?)',
                                 (ticket['transition_id'],ticket['input_sha256'],payload))
+            if custody is not None:
+                successor=custody.stage_source_entity(self,retained_before,ticket,kind,record,actor)
+        if successor is not None:custody.finish(successor)
         if ticket is not None:await self.pool_guard.complete(ticket,record)
         return record
 
@@ -490,12 +529,17 @@ class LocalCourseProvider:
             self.db.backup(target)
 
 
-def configure_provider(config, path, console):
+def configure_provider(config, path, console, *, managed_installation=None, pool_guard=None):
     settings=config.get('nativePoolHeads',{'enabled':False})
     if type(settings) is not dict or set(settings)!={'enabled'} or type(settings['enabled']) is not bool:
         raise ValueError('Exact default-off nativePoolHeads configuration required')
     if settings['enabled']:
-        raise ValueError('V2 operator applicator and complete authoritative writer coverage unavailable')
+        from cps_compute.native_hub_installation import ManagedHubInstallation
+        if (type(managed_installation) is not ManagedHubInstallation
+            or managed_installation.binding['console']!=console
+            or managed_installation.binding['source']['source_path']!=str(Path(path).resolve())):
+            raise ValueError('V2 operator applicator and genuine installed authority required')
+        return managed_installation.reopen_source(pool_guard)
     if config.get('moodle', {}).get('enabled', False):
         return MoodleCourseProvider()
     if not config.get('local', {}).get('enabled', True):

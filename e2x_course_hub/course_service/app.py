@@ -134,6 +134,7 @@ class CourseServiceApp(Application):
             "api": api,
             "course_provider": provider,
             "compute_policy": compute,
+            "runtime_observation_token": self.compute_policy_token,
             "compute_gateway_url": self.compute_gateway_url,
             "console_owner": self.console_owner,
             "legacy_rbac_roles": self.legacy_rbac_roles,
@@ -150,6 +151,7 @@ class CourseServiceApp(Application):
         self.tornado_settings = settings
 
     def init_handlers(self):
+        from ..cps.runtime_observation import RuntimeObservationHandler
         app_handlers = [
             (
                 ujoin(self.service_prefix, "static", "(.*)"),
@@ -159,6 +161,10 @@ class CourseServiceApp(Application):
             (
                 ujoin(self.service_prefix, "oauth_callback"),
                 SafeOAuthCallbackHandler,
+            ),
+            (
+                ujoin(self.service_prefix, "internal/v1/runtime-observation"),
+                RuntimeObservationHandler,
             ),
         ]
         for pattern, handler in apihandlers.default_handlers + cps_handlers + platform_handlers + proxy_handlers + handlers.default_handlers:

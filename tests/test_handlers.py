@@ -18,6 +18,9 @@ class HandlersTest(AsyncHTTPTestCase):
         self.admin = True
         self.groups = []
         self.hub_failure = False
+        self.pending_operations = []
+        self.pending_operation_calls = 0
+        self.archive_verification_failure = False
         outer = self
         class Hub:
             async def get_user(self,name): return {'admin':outer.admin,'groups':outer.groups}
@@ -30,8 +33,11 @@ class HandlersTest(AsyncHTTPTestCase):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
         self.record_handler=Records
-        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
+        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, AssignmentCloseHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
         class Assignment(AssignmentHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class AssignmentClose(AssignmentCloseHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
         class Workspace(WorkspaceHandler):
@@ -43,15 +49,27 @@ class HandlersTest(AsyncHTTPTestCase):
         class Identity(IdentityMappingHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
+        async def pending_workspace_removals(visitor, workspace):
+            outer.pending_operation_calls += 1
+            return list(outer.pending_operations)
+        outer.pending_workspace_removals = pending_workspace_removals
         class Service:
+            provider = outer.provider
+            accounts = NS(controller=NS(pending_workspace_removals=outer.pending_workspace_removals))
+
             async def get(self,identifier):
                 return next(r for r in await outer.provider.list('workspaces') if r['id']==identifier)
             async def start(self,identifier,**kwargs):
                 if outer.hub_failure:raise RuntimeError('Hub unavailable')
                 record=await self.get(identifier)
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
+            async def close_assignment(self,assignment,*,actor):
+                if outer.archive_verification_failure:
+                    raise ValueError('Read-only archive verification required')
+                return {**assignment,'state':'closed','archived':True}
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
-            (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
+            (r'/assignment',Assignment),(r'/assignment-close/([^/]+)',AssignmentClose),
+            (r'/workspace/([^/]+)/(start|stop|remove-member|status|operations)',Workspace),
             (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
@@ -60,6 +78,27 @@ class HandlersTest(AsyncHTTPTestCase):
         self.provider.db.close()
         self.tmp.cleanup()
         super().tearDown()
+
+    def test_hub_group_bindings_require_fresh_administrator_and_preserve_unspecified(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('groups',{'id':'g','course_id':'c'},actor='admin')
+        self.io_loop.run_sync(seed)
+        row={'group_id':'g','hub_group':'team','role':'student'}
+        self.groups=['lms.course.c.course-owner'];self.admin=False
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[row]})).code,403)
+        self.admin=True
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[row]})).code,200)
+        self.admin=False
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','name':'Renamed'})).code,200)
+        self.assertEqual(self.io_loop.run_sync(self.provider.courses)[0]['hub_group_bindings'],[row])
+        self.assertEqual(self.fetch('/records/courses',method='POST',body=json.dumps(
+            {'id':'c','hub_group_bindings':[]})).code,403)
+        self.assertEqual(self.fetch('/records/courses',method='DELETE',body=json.dumps({'id':'c'}),
+            allow_nonstandard_methods=True).code,403)
 
     def test_two_actual_visitors_have_distinct_identity(self):
         calls=[]
@@ -126,6 +165,31 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(records[0]['person_id'],'alice')
         self.assertEqual(records[0]['course_id'],'a')
 
+    def test_workspace_operation_discovery_is_read_only_and_no_store(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'course'},actor='admin')
+            await self.provider.put('terms',{'id':'term','course_id':'course'},actor='admin')
+            await self.provider.put('groups',{'id':'group','course_id':'course','term_id':'term'},actor='admin')
+            await self.provider.put('workspaces',{'id':'workspace','course_id':'course','term_id':'term',
+                'group_id':'group','state':'stopped'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.pending_operations=[dict(operation_id='44444444-4444-4444-8444-444444444444',
+            input_sha256='sha256:'+'a'*64,state='prepared')]
+        before=self.provider.db.total_changes
+        response=self.fetch('/workspace/workspace/operations')
+        self.assertEqual(response.code,200)
+        self.assertEqual(response.headers['Cache-Control'],'no-store')
+        self.assertEqual(json.loads(response.body),{'operations':self.pending_operations})
+        self.assertEqual(self.provider.db.total_changes,before)
+        self.assertEqual(self.fetch('/workspace/workspace/operations?actor=admin').code,400)
+        calls=self.pending_operation_calls
+        self.admin=False
+        self.groups=[]
+        self.assertEqual(self.fetch('/workspace/workspace/operations').code,403)
+        self.assertEqual(self.pending_operation_calls,calls)
+        self.groups=['lms.course.course.course-owner']
+        self.assertEqual(self.fetch('/workspace/workspace/operations').code,200)
+
     def test_instructor_course_term_crud_assignment_and_workspace_scope(self):
         async def seed():
             await self.provider.put('courses',{'id':'c','resource_ceiling':{'cpu':'2','memory':'4Gi','gpuMemoryGiB':5},'workspace_bindings':[{'group_id':'g','hub_user':'neutral','hub_server':'shared'}]},actor='admin')
@@ -172,6 +236,16 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(len(entries),4)
         self.assertEqual([r['outcome'] for r in entries],['invalid','invalid','failure','denied'])
         self.assertTrue(all(r['actor']=='admin' and r['time'] and r['previous'] is not None and r['current'] is not None for r in entries))
+
+    def test_unverified_assignment_archive_returns_actionable_conflict(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('assignments',{'id':'a','course_id':'c','mode':'manual','source':'local'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.archive_verification_failure=True
+        response=self.fetch('/assignment-close/a',method='POST',body='{}')
+        self.assertEqual(response.code,409)
+        self.assertIn(b'archive verification failed',response.body.lower())
 
     def test_expired_teaching_membership_surviving_login_is_no_longer_effective(self):
         group='lms.course.c.term.t.instructor'
@@ -227,6 +301,20 @@ class HandlersTest(AsyncHTTPTestCase):
                     body=json.dumps({'id':'c', field:'untrusted'}))
                 self.assertEqual(response.code, 400)
         self.assertEqual(self.io_loop.run_sync(self.provider.courses), [])
+
+    def test_direct_membership_delete_requires_controlled_workspace_lifecycle(self):
+        async def seed():
+            await self.provider.put('courses', {'id':'c'}, actor='admin')
+            await self.provider.put('groups', {'id':'g','course_id':'c'}, actor='admin')
+            await self.provider.put('memberships', {'id':'m','course_id':'c','group_id':'g',
+                'person_id':'student'}, actor='admin')
+        self.io_loop.run_sync(seed)
+
+        response = self.fetch('/records/memberships', method='DELETE',
+            body=json.dumps({'id':'m'}), allow_nonstandard_methods=True)
+
+        self.assertEqual(response.code, 405)
+        self.assertEqual(self.io_loop.run_sync(lambda:self.provider.members('c'))[0]['id'], 'm')
 
     def test_membership_mutations_blocked_while_starting_or_reconciling(self):
         async def seed(state):

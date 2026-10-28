@@ -16,6 +16,8 @@ export default function PlatformPage({section}: {section: Section}) {
   const [draft,setDraft] = useState<Record<string,unknown>>(examples[section]);
   const [person,setPerson] = useState('');
   const [loaded,setLoaded] = useState(false);
+  const [operations,setOperations] = useState<Record<string,Record<string,unknown>>>({});
+  const [runtime,setRuntime] = useState<Record<string,Record<string,unknown>>>({});
   const url = section === 'compute' ? `${config.apiUrl}/compute` : `${config.apiUrl}/local/${section}`;
   async function refresh() {
     try {
@@ -45,8 +47,34 @@ export default function PlatformPage({section}: {section: Section}) {
   async function action(id:unknown,action:string) {
     const membership_id = action==='remove-member' ? window.prompt('Membership identifier to remove. This stops the shared kernel and preserves files.') : null;
     if (action==='remove-member' && !membership_id) return;
-    try { await requests.post(`${config.apiUrl}/workspaces/${encodeURIComponent(String(id))}/${action}`,membership_id ? {membership_id} : {});await refresh(); }
+    try {
+      const result=await requests.post(`${config.apiUrl}/workspaces/${encodeURIComponent(String(id))}/${action}`,membership_id ? {membership_id} : {}) as Record<string,unknown>;
+      if (result.state) setOperations(previous=>({...previous,[String(id)]:result}));
+      await refresh();
+    }
     catch(err){setError(String(err));}
+  }
+  useEffect(()=>{
+    if(section!=='workspaces') return;
+    let active=true;
+    async function poll(){
+      for(const record of records){
+        if(!record?.id) continue;
+        try {
+          const result=await requests.get(`${config.apiUrl}/workspaces/${encodeURIComponent(String(record.id))}/status`) as {runtime:Record<string,unknown>};
+          if(active) setRuntime(previous=>({...previous,[String(record.id)]:result.runtime}));
+        } catch { if(active) setRuntime(previous=>({...previous,[String(record.id)]:{unavailable:true}})); }
+      }
+    }
+    void poll();const timer=window.setInterval(()=>void poll(),3000);
+    return ()=>{active=false;window.clearInterval(timer);};
+  },[section,records]);
+  async function resume(id:string){
+    const operation=operations[id];
+    try {
+      const result=await requests.post(`${config.apiUrl}/local/hub-groups/operations/${encodeURIComponent(String(operation.operation_id))}`,{input_sha256:operation.input_sha256}) as Record<string,unknown>;
+      setOperations(previous=>({...previous,[id]:result}));await refresh();
+    } catch(err){setError(String(err));}
   }
   function field(key:string,value:unknown) {
     if(typeof value==='number') return <input type="number" value={value} onChange={e=>setDraft({...draft,[key]:Number(e.target.value)})} />;
@@ -68,6 +96,9 @@ export default function PlatformPage({section}: {section: Section}) {
       {section==='workspaces' && <div className="flex gap-4">
         <button onClick={()=>action(r.id,'start')}>Start</button><button onClick={()=>action(r.id,'stop')}>Stop</button>
         <button onClick={()=>action(r.id,'remove-member')}>Remove member</button>
+        <span>Runtime: {runtime[String(r.id)]?.ready===true?'running':runtime[String(r.id)]?.stopped===true?'stopped':runtime[String(r.id)]?.pending?String(runtime[String(r.id)].pending):'unavailable'}</span>
+        {operations[String(r.id)] && <span>Operation: {String(operations[String(r.id)].state)}</span>}
+        {operations[String(r.id)]?.operation_id && operations[String(r.id)].state!=='effective' ? <button onClick={()=>resume(String(r.id))}>Resume removal</button>:null}
       </div>}
     </li>)}</ul>
     {section!=='audit' && <form onSubmit={e=>{e.preventDefault();void save();}}>

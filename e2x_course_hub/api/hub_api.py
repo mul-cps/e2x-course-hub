@@ -1,4 +1,6 @@
 import json
+import re
+from urllib.parse import unquote, urlsplit
 
 from jupyterhub.services.auth import HubOAuth
 from jupyterhub.utils import url_path_join as ujoin
@@ -32,6 +34,34 @@ class HubAPI(HubOAuth):
         """Get authorization header for Hub API requests."""
         return {"Authorization": f"token {self.api_token}"}
 
+    def _request_path(self, url):
+        """Validate the credential boundary before any authenticated network I/O."""
+        try:
+            base, target = urlsplit(self.api_url), urlsplit(url)
+            valid_origin = (
+                base.scheme in ('http', 'https') and base.hostname
+                and target.scheme == base.scheme and target.netloc == base.netloc
+                and base.username is None and target.username is None
+                and base.password is None and target.password is None
+                and not base.query and not base.fragment and not target.fragment
+            )
+            prefix = base.path.rstrip('/') + '/'
+            if not valid_origin or not target.path.startswith(prefix):
+                raise ValueError('outside configured API')
+            # Reject traversal and encoded separators before HTTP libraries or
+            # reverse proxies can normalize them differently. A literal percent
+            # after decoding is also ambiguous under double decoding.
+            for segment in target.path.split('/'):
+                decoded = unquote(segment, errors='strict')
+                if (decoded in ('.', '..') or any(c in decoded for c in '/\\%')
+                        or any(ord(c) < 32 or ord(c) == 127 for c in decoded)):
+                    raise ValueError('ambiguous API path')
+            if any(ord(c) <= 32 or ord(c) == 127 for c in url):
+                raise ValueError('invalid URL characters')
+            return target.path[len(prefix):]
+        except (ValueError, UnicodeError) as error:
+            raise HubAPIError('Hub request must stay within the configured API') from error
+
     async def request(self, url, method="GET", body=None) -> HTTPResponse:
         """Make an authenticated request to the Hub API.
 
@@ -46,8 +76,11 @@ class HubAPI(HubOAuth):
         Raises:
             HubAPIError: If the request fails
         """
+        path = self._request_path(url)
+        method = method.upper()
         req = HTTPRequest(
-            url, method=method, headers=self.auth_header, body=body, allow_nonstandard_methods=True
+            url, method=method, headers=self.auth_header, body=body, allow_nonstandard_methods=True,
+            follow_redirects=False
         )
         provider = getattr(self, 'audit_provider', None)
         mutation = method in ('POST','PUT','PATCH','DELETE')
@@ -55,16 +88,19 @@ class HubAPI(HubOAuth):
         # silently invalidate the immutable v2 Source through legacy Hub APIs.
         if provider is not None and mutation and hasattr(provider,'_pool_mode_guard'):provider._pool_mode_guard()
         if provider is not None and getattr(provider,'pool_guard',None) is not None and mutation:
-            from urllib.parse import urlsplit
-            path=urlsplit(url).path
-            stopping=method=='DELETE' and '/users/' in path and ('/servers/' in path or path.endswith('/server'))
+            stopping = method == 'DELETE' and re.fullmatch(
+                r'users/[^/]+/(?:server|servers/[^/]+)', path
+            ) is not None
             if not stopping:provider.pool_guard.deny_uncovered('legacy Hub mutation')
         snapshot_url = url
-        if '/groups/' in url and url.endswith('/users'): snapshot_url = url.rsplit('/users',1)[0]
-        if '/users/' in url and '/servers/' in url: snapshot_url = url.split('/servers/',1)[0]
+        if re.fullmatch(r'groups/[^/]+/users', path):
+            snapshot_url = ujoin(self.api_url, path.rsplit('/users', 1)[0])
+        elif re.fullmatch(r'users/[^/]+/servers/[^/]+', path):
+            snapshot_url = ujoin(self.api_url, path.rsplit('/servers/', 1)[0])
         async def snapshot():
+            self._request_path(snapshot_url)
             try:
-                response = await self.client.fetch(HTTPRequest(snapshot_url,headers=self.auth_header))
+                response = await self.client.fetch(HTTPRequest(snapshot_url,headers=self.auth_header, follow_redirects=False))
                 return json.loads(response.body) if response.body else None
             except HTTPClientError as error:
                 return None if error.code == 404 else {'unavailable':error.code}

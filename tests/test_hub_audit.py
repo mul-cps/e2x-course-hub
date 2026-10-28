@@ -18,7 +18,7 @@ class HubAuditTest(unittest.TestCase):
             class Hub:
                 async def get_user(self, username):
                     return {'name':username, 'admin':False, 'groups':['c.t.teacher']}
-            handler = NS(get_current_user=lambda:{'name':'instructor'},
+            handler = NS(get_current_user=lambda:{'kind':'user','name':'instructor'},
                 course_api=NS(hub_api=Hub()), settings={'course_provider':provider,
                 'legacy_rbac_roles':{'teacher':'instructor'}})
             async def run():

@@ -37,6 +37,7 @@ Issues = "https://github.com/Digiklausur/e2x-course-hub/issues"
 Source = "https://github.com/Digiklausur/e2x-course-hub"
 
 [project.optional-dependencies]
+compute = ["cps-compute==0.1.0"]
 dev = [
   "pre-commit",
   "ruff",

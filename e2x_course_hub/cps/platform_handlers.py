@@ -36,25 +36,78 @@ class ComputeHandler(RecordsHandler):
         self.write(result or {})
 
 class WorkspaceHandler(RecordsHandler):
+    def on_finish(self):
+        if getattr(self.settings.get('course_provider'),'pool_guard',None) is not None:
+            # These closed managed service methods retain their semantic journal
+            # and denial successor. The legacy request writer would escape custody.
+            from ..course_service.handlers.base import BaseHandler
+            return BaseHandler.on_finish(self)
+        return super().on_finish()
+
+    @web.authenticated
+    async def get(self,identifier,action):
+        if action not in ('status','operations'):raise web.HTTPError(405)
+        service=self.settings.get('workspace_service')
+        if service is None:raise web.HTTPError(503)
+        workspace=await service.get(identifier)
+        await self.authorize(workspace['course_id'],workspace.get('term_id'),read=True)
+        controller=getattr(getattr(service,'accounts',None),'controller',None)
+        if controller is None:raise web.HTTPError(503,reason='Managed runtime observer unavailable')
+        if action=='operations':
+            if self.request.query:raise web.HTTPError(400,reason='No operation discovery query fields accepted')
+            try:
+                operations=await controller.pending_workspace_removals(await self.get_user(),identifier)
+            except PermissionError:
+                raise web.HTTPError(403,reason='Fresh authenticated Hub identity required') from None
+            except (ValueError,KeyError,TypeError):
+                raise web.HTTPError(409,reason='Retained workspace operation unavailable') from None
+            self.set_header('Cache-Control','no-store')
+            self.write({'operations':operations})
+            return
+        from urllib.parse import quote
+        user=await controller._hub('users/'+quote(workspace['hub_user'],safe='')+'?include_stopped_servers=true')
+        server=user.get('servers',{}).get(workspace['hub_server'])
+        if type(server) is not dict:raise web.HTTPError(409,reason='Exact scoped runtime observation unavailable')
+        self.set_header('Cache-Control','no-store')
+        self.write({'workspace':identifier,'runtime':{key:server[key] for key in ('name','ready','stopped','pending','started')}})
+
     @web.authenticated
     async def post(self, identifier, action):
+        if action not in ('start','stop','remove-member'):raise web.HTTPError(405)
         service = self.settings.get('workspace_service')
         if service is None: raise web.HTTPError(503,reason='Shared workspace lifecycle not configured')
         workspace=await service.get(identifier)
         actor=await self.authorize(workspace['course_id'],workspace.get('term_id'))
         data=self.body() if self.request.body else {}
         allowed = {'membership_id'} if action == 'remove-member' else set()
-        if set(data)-allowed: raise web.HTTPError(400,reason='Resource overrides and lifecycle assertions are not accepted')
+        if set(data)!=allowed: raise web.HTTPError(400,reason='Exact lifecycle fields required')
+        managed=getattr(service.provider,'pool_guard',None) is not None
         try:
-            if action == 'start': await service.start(identifier,actor=actor)
-            elif action == 'stop': await service.close(identifier,actor=actor)
-            else: await service.remove_member(identifier,data['membership_id'],actor=actor)
-        except (ValueError,KeyError) as error: raise web.HTTPError(400,reason=str(error))
+            if action == 'start': result=await service.start(identifier,actor=actor)
+            elif action == 'stop': result=await service.close(identifier,actor=actor)
+            else: result=await service.remove_member(identifier,data['membership_id'],actor=actor)
+        except (ValueError,KeyError) as error:
+            if managed and action=='remove-member':
+                c=service.accounts.controller
+                # Only original validated, retained operations may become recovery
+                # responses. A corrupt/unavailable journal still refuses.
+                matches=[]
+                for op,ih in c.provider.db.execute('SELECT operation_id,input_sha256 FROM hub_journal_operation'):
+                    record=c.journal.read(op,ih);request=record['intent']['request']
+                    if request['action']=='shared-student-remove' and request['workspace']==identifier and request['membership_id']==data['membership_id']:
+                        matches.append(record)
+                if len(matches)==1 and matches[0]['actor']==actor:
+                    result=matches[0]
+                else:raise web.HTTPError(409,reason='Original removal unavailable; retain recovery context') from None
+            else:raise web.HTTPError(409 if managed else 400,reason=str(error)) from None
         except PermissionError as error: raise web.HTTPError(403,reason=str(error))
         except TimeoutError as error: raise web.HTTPError(409,reason=str(error))
         except RuntimeError as error: raise web.HTTPError(503,reason=str(error))
         except HTTPClientError as error: raise web.HTTPError(error.code,reason='Shared compute policy rejected request')
-        self.write({'workspace':await service.get(identifier)})
+        if managed:
+            self.set_status(202);self.set_header('Cache-Control','no-store')
+            self.write({key:result[key] for key in ('state','workspace','operation_id','input_sha256') if key in result})
+        else:self.write({'workspace':await service.get(identifier)})
 
 class AssignmentHandler(RecordsHandler):
     @web.authenticated
@@ -103,7 +156,7 @@ class AssignmentHandler(RecordsHandler):
 default_handlers = [
     (r'/api/compute',ComputeHandler),
     (r'/api/assignments/allocate',AssignmentHandler),
-    (r'/api/workspaces/([^/]+)/(start|stop|remove-member)',WorkspaceHandler),
+    (r'/api/workspaces/([^/]+)/(start|stop|remove-member|status|operations)',WorkspaceHandler),
 ]
 
 class WorkspaceCreateHandler(RecordsHandler):
@@ -156,6 +209,11 @@ class AssignmentCloseHandler(RecordsHandler):
             result = await service.close_assignment(assignment,actor=actor)
         except RuntimeError as error:
             raise web.HTTPError(503,reason=str(error))
+        except ValueError as error:
+            if str(error) != 'Read-only archive verification required':
+                raise
+            raise web.HTTPError(409,
+                reason='Read-only archive verification failed; assignment remains pending') from None
         except (TimeoutError,HTTPClientError) as error:
             raise web.HTTPError(409,reason='Writer shutdown or reservation release not confirmed')
         self.write({'assignment':result,'notice':'Verified read-only archive; files retained.'})

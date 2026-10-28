@@ -549,3 +549,168 @@ test("keyboard skip link and navigation announce destination", async ({
   await expect(page).toHaveTitle("Projects · Compute Platform");
   await expect(page.locator("#main-content")).toBeFocused();
 });
+
+test("workspace removal exposes operation status and supports resuming accepted work", async ({
+  page,
+}) => {
+  const removeResponse = {
+    operation_id: "op-a",
+    input_sha256: "sha-a",
+    state: "accepted",
+  };
+  const resumeResponse = {
+    operation_id: "op-a",
+    input_sha256: "sha-a",
+    state: "effective",
+  };
+  let discovered: Record<string, unknown>[] = [removeResponse];
+  const lifecycleWrites: { path: string; body: Record<string, unknown> }[] = [];
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { pending: "removing" } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", (route) =>
+    route.fulfill({ json: { operations: discovered } }),
+  );
+  await page.route("**/api/workspaces/ws-a/remove-member", async (route) => {
+    lifecycleWrites.push({
+      path: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON(),
+    });
+    await route.fulfill({ json: removeResponse });
+  });
+  await page.route("**/api/local/hub-groups/operations/op-a", async (route) => {
+    lifecycleWrites.push({
+      path: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON(),
+    });
+    discovered = [];
+    await route.fulfill({ json: resumeResponse });
+  });
+
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Remove member", exact: true })
+    .click();
+  await page.getByLabel("Course membership").selectOption("m-alice");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Remove member" })
+    .click();
+
+  await expect(page.getByText("Operation: accepted")).toBeVisible();
+  await expect(page.getByText("Runtime: removing")).toBeVisible();
+  await page.getByRole("button", { name: "Resume removal" }).click();
+  await expect(page.getByText("Operation: effective")).toBeVisible();
+  expect(lifecycleWrites).toEqual([
+    {
+      path: "/api/workspaces/ws-a/remove-member",
+      body: { membership_id: "m-alice" },
+    },
+    {
+      path: "/api/local/hub-groups/operations/op-a",
+      body: { input_sha256: "sha-a" },
+    },
+  ]);
+});
+
+test("workspace reload discovers retained removal and resumes with journal hash", async ({
+  page,
+}) => {
+  const requests: {
+    method: string;
+    path: string;
+    body?: Record<string, unknown>;
+  }[] = [];
+  let discovered: Record<string, unknown>[] = [
+    {
+      operation_id: "op-reloaded",
+      input_sha256: "sha-reloaded",
+      state: "prepared",
+    },
+  ];
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { stopped: true } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", async (route) => {
+    requests.push({
+      method: route.request().method(),
+      path: new URL(route.request().url()).pathname,
+    });
+    await route.fulfill({ json: { operations: discovered } });
+  });
+  await page.route(
+    "**/api/local/hub-groups/operations/op-reloaded",
+    async (route) => {
+      requests.push({
+        method: route.request().method(),
+        path: new URL(route.request().url()).pathname,
+        body: route.request().postDataJSON(),
+      });
+      discovered = [];
+      await route.fulfill({
+        json: {
+          operation_id: "op-reloaded",
+          input_sha256: "sha-reloaded",
+          state: "effective",
+        },
+      });
+    },
+  );
+
+  await page.goto("/workspaces");
+  await expect(page.getByText("Operation: prepared")).toBeVisible();
+  await page.getByRole("button", { name: "Resume removal" }).click();
+  await expect(page.getByText("Operation: effective")).toBeVisible();
+  expect(requests).toEqual([
+    { method: "GET", path: "/api/workspaces/ws-a/operations" },
+    {
+      method: "POST",
+      path: "/api/local/hub-groups/operations/op-reloaded",
+      body: { input_sha256: "sha-reloaded" },
+    },
+    { method: "GET", path: "/api/workspaces/ws-a/operations" },
+  ]);
+});
+
+test("denied workspace operation discovery exposes no recovery mutation", async ({
+  page,
+}) => {
+  let recoveryWrites = 0;
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { stopped: true } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", (route) =>
+    route.fulfill({ status: 403, json: { detail: "Forbidden" } }),
+  );
+  await page.route("**/api/local/hub-groups/operations/**", async (route) => {
+    recoveryWrites += 1;
+    await route.fulfill({ json: {} });
+  });
+  await page.goto("/workspaces");
+  await expect(page.getByText("Runtime: stopped")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Resume removal" }),
+  ).toHaveCount(0);
+  expect(recoveryWrites).toBe(0);
+});
+
+test("workspace status denial stays unavailable and its poll stops after navigation", async ({
+  page,
+}) => {
+  let statusReads = 0;
+  await page.clock.install();
+  await page.route("**/api/workspaces/ws-a/status", async (route) => {
+    statusReads += 1;
+    await route.fulfill({ status: 403, json: { detail: "Forbidden" } });
+  });
+
+  await page.goto("/workspaces");
+  await expect(page.getByText("Runtime: unavailable")).toBeVisible();
+  await expect.poll(() => statusReads).toBe(1);
+  await page.clock.fastForward(3000);
+  await expect.poll(() => statusReads).toBe(2);
+
+  await page.goto("/courses");
+  await page.clock.fastForward(6000);
+  expect(statusReads).toBe(2);
+});

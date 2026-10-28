@@ -16,7 +16,14 @@ class WorkspaceBinding(BaseModel):
     namespace: Optional[str] = None
     pod: Optional[str] = None
 
+class HubGroupBinding(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    group_id: str
+    hub_group: str
+    role: str
+
 class Course(Record):
+    hub_group_bindings: List[HubGroupBinding] = Field(default_factory=list)
     reconciliation_pending: bool = False
     membership_removal_pending: Optional[str] = None
     membership_removal_group_id: Optional[str] = None
