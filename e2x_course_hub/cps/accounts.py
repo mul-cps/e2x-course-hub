@@ -28,11 +28,22 @@ class CentralWorkspaceFilesystemAdapter:
     async def archive(self, workspaces, *, actor, assignment=None):
         if (type(workspaces) is not list or not workspaces
                 or any(type(workspace) is not dict or type(workspace.get('id')) is not str
-                    or not workspace['id'].strip() for workspace in workspaces)):
+                    or not workspace['id'].strip() or type(workspace.get('group_id')) is not str
+                    or not workspace['group_id'].strip() for workspace in workspaces)):
             raise ValueError('Exact retained workspace archive targets required')
-        result = await self.compute.archive_workspaces(
-            [workspace['id'] for workspace in workspaces], actor=actor, assignment=assignment)
-        if (type(result) is not dict or result.get('read_only_verified') is not True
-                or not result.get('evidence')):
-            raise ValueError('Read-only archive verification required')
-        return result
+        groups = {}
+        for workspace in workspaces:
+            groups.setdefault(workspace['group_id'], []).append(workspace['id'])
+        proofs = []
+        for group_id in sorted(groups):
+            names = sorted(groups[group_id])
+            if len(names) != len(set(names)):
+                raise ValueError('Unique retained workspace archive targets required')
+            result = await self.compute.archive_workspaces(
+                names, actor=actor, assignment=assignment)
+            if (type(result) is not dict or result.get('read_only_verified') is not True
+                    or not result.get('evidence')):
+                raise ValueError('Read-only archive verification required')
+            proofs.append({'group_id': group_id, 'evidence': result['evidence']})
+        return {'state': 'archived', 'read_only_verified': True,
+            'evidence': {'groups': proofs}}

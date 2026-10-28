@@ -332,7 +332,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.service.filesystem=CentralWorkspaceFilesystemAdapter(self.service.compute)
         result=await self.service.close_assignment(assignment,actor='teacher')
         self.assertTrue(result['archived'])
-        self.assertEqual(result['archive_evidence']['evidence']['nas'],'retained')
+        self.assertEqual(result['archive_evidence']['evidence']['groups'][0]['evidence']['nas'],'retained')
         self.assertLess(self.calls.index('stop:w'),self.calls.index('archive'))
 
     async def test_central_archive_adapter_never_claims_unverified_archive(self):
@@ -346,6 +346,53 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError,'archive verification'):
             await self.service.close_assignment(assignment,actor='teacher')
         saved=await self.service.get('w')
+        self.assertTrue(saved['archive_pending'])
+        self.assertFalse(saved.get('archived',False))
+
+    async def test_assignment_archive_partitions_by_trusted_group(self):
+        from e2x_course_hub.cps.accounts import CentralWorkspaceFilesystemAdapter
+        await self.provider.put('groups',{'id':'g2','course_id':'c','assignment_id':'a'},actor='admin')
+        await self.provider.put('workspaces',{'id':'w1','course_id':'c','group_id':'g',
+            'hub_user':'neutral1','hub_server':'rtc1','profile':'cpu'},actor='admin')
+        await self.provider.put('workspaces',{'id':'w2','course_id':'c','group_id':'g2',
+            'hub_user':'neutral2','hub_server':'rtc2','profile':'cpu'},actor='admin')
+        calls=[]
+        async def archive(names, *, actor, assignment=None):
+            calls.append(names)
+            if not names or len(names)>2:
+                raise AssertionError('Compute archive accepts one registered group per request')
+            return {'state':'archived','read_only_verified':True,
+                'evidence':{'nas':names[0]}}
+        self.service.compute.archive_workspaces=archive
+        self.service.filesystem=CentralWorkspaceFilesystemAdapter(self.service.compute)
+        assignment=(await self.provider.list('assignments'))[0]
+        result=await self.service.close_assignment(assignment,actor='teacher')
+        self.assertEqual(calls,[['w','w1'],['w2']])
+        self.assertTrue(result['archived'])
+        proofs=result['archive_evidence']['evidence']['groups']
+        self.assertEqual([(row['group_id'],row['evidence']['nas']) for row in proofs],
+            [('g','w'),('g2','w2')])
+
+    async def test_partial_multi_group_archive_keeps_assignment_pending(self):
+        from e2x_course_hub.cps.accounts import CentralWorkspaceFilesystemAdapter
+        await self.provider.put('groups',{'id':'g2','course_id':'c','assignment_id':'a'},actor='admin')
+        await self.provider.put('workspaces',{'id':'w1','course_id':'c','group_id':'g',
+            'hub_user':'neutral1','hub_server':'rtc1','profile':'cpu'},actor='admin')
+        await self.provider.put('workspaces',{'id':'w2','course_id':'c','group_id':'g2',
+            'hub_user':'neutral2','hub_server':'rtc2','profile':'cpu'},actor='admin')
+        calls=[]
+        async def archive(names, *, actor, assignment=None):
+            calls.append(names)
+            if names==['w2']:
+                return {'state':'archived','read_only_verified':False,'evidence':{'nas':'unverified'}}
+            return {'state':'archived','read_only_verified':True,'evidence':{'nas':'w'}}
+        self.service.compute.archive_workspaces=archive
+        self.service.filesystem=CentralWorkspaceFilesystemAdapter(self.service.compute)
+        assignment=(await self.provider.list('assignments'))[0]
+        with self.assertRaisesRegex(ValueError,'archive verification'):
+            await self.service.close_assignment(assignment,actor='teacher')
+        self.assertEqual(calls,[['w','w1'],['w2']])
+        saved=next(row for row in await self.provider.list('assignments') if row['id']=='a')
         self.assertTrue(saved['archive_pending'])
         self.assertFalse(saved.get('archived',False))
 
