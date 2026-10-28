@@ -11,6 +11,9 @@ from cps_compute.storage import HTTPFilesystemAdapter, StorageError, binding
 from e2x_course_hub.cps.providers import LocalCourseProvider
 from e2x_course_hub.cps.workspaces import WorkspaceService
 from e2x_course_hub.cps.filesystem import CourseServiceFilesystemAdapter
+from e2x_course_hub.cps.platform_handlers import AssignmentCloseHandler
+from tornado import web
+from tornado.testing import AsyncHTTPTestCase
 
 
 @pytest.mark.asyncio
@@ -157,7 +160,7 @@ async def test_workspace_assignment_stays_pending_after_later_group_archive_fail
                                               'group_id': group, 'hub_user': 'neutral-' + name,
                                               'hub_server': 'rtc', 'profile': 'cpu'}, actor='admin')
         workspace_service = WorkspaceService(provider, Compute(), Hub(), filesystem=adapter)
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RuntimeError, match='Filesystem archive verification failed'):
             await workspace_service.close_assignment(assignment, actor='teacher')
         saved_assignment = (await provider.list('assignments'))[0]
         saved_workspaces = await provider.list('workspaces')
@@ -170,3 +173,74 @@ async def test_workspace_assignment_stays_pending_after_later_group_archive_fail
     finally:
         await adapter.client.aclose()
         provider.db.close()
+
+
+class AssignmentCloseArchiveFailureRouteTest(AsyncHTTPTestCase):
+    def get_app(self):
+        outer = self
+        self.assignment = {'id': 'assignment-a', 'course_id': 'course-a', 'source': 'local'}
+        self.provider = SimpleNamespace(list=self.list_assignments)
+        self.adapter = CourseServiceFilesystemAdapter.__new__(CourseServiceFilesystemAdapter)
+
+        class CloseService:
+            async def close_assignment(inner, assignment, *, actor):
+                assignment['archive_pending'] = True
+                await outer.adapter.archive([{'id': 'workspace-a', 'group_id': 'group-a'}],
+                                            actor=actor, assignment=assignment)
+                assignment['archive_pending'] = False
+                assignment['archived'] = True
+                return assignment
+
+        class Handler(AssignmentCloseHandler):
+            def get_current_user(inner):
+                return {'name': 'teacher'}
+
+            async def authorize(inner, *args, **kwargs):
+                return 'teacher'
+
+            def on_finish(inner):
+                pass
+
+        return web.Application(
+            [(r'/api/assignments/([^/]+)/close', Handler)],
+            course_provider=self.provider,
+            workspace_service=CloseService(),
+            cookie_secret='test-secret',
+            last_config_check=10**12,
+        )
+
+    async def list_assignments(self, kind):
+        assert kind == 'assignments'
+        return [self.assignment]
+
+    def test_http_409_transport_and_unverified_proof_return_503_pending(self):
+        class Client:
+            def __init__(self, failure):
+                self.failure = failure
+
+            async def post(self, *args, **kwargs):
+                request = httpx.Request('POST', 'https://gateway.test/archive')
+                if self.failure == 'http-409':
+                    response = httpx.Response(409, request=request)
+                    raise httpx.HTTPStatusError('private backend detail', request=request,
+                                                response=response)
+                if self.failure == 'transport':
+                    raise httpx.ConnectError('private transport detail', request=request)
+                if self.failure == 'unverified':
+                    body = {'read_only_verified': False, 'evidence': {'hash': 'x'}}
+                    return httpx.Response(200, json=body, request=request)
+                if self.failure == 'malformed-proof':
+                    return httpx.Response(200, json={'read_only_verified': True, 'evidence': []},
+                                          request=request)
+                return httpx.Response(200, content=b'not-json', request=request)
+
+        for failure in ('http-409', 'transport', 'unverified', 'malformed-proof', 'malformed-json'):
+            self.assignment.clear()
+            self.assignment.update({'id': 'assignment-a', 'course_id': 'course-a', 'source': 'local'})
+            self.adapter.client = Client(failure)
+            response = self.fetch(f'/api/assignments/assignment-a/close', method='POST', body='{}')
+            self.assertEqual(response.code, 503, failure)
+            self.assertIn('Filesystem archive verification failed', response.body.decode(), failure)
+            self.assertNotIn('private', response.body.decode(), failure)
+            self.assertTrue(self.assignment['archive_pending'], failure)
+            self.assertFalse(self.assignment.get('archived', False), failure)

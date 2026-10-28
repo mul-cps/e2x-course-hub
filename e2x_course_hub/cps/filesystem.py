@@ -1,6 +1,12 @@
 """Course-service compatibility adapter for the installed compute storage SDK."""
 
+import json
+
+import httpx
+
 from cps_compute.storage import HTTPFilesystemAdapter, StorageError
+
+_ARCHIVE_VERIFICATION_FAILED = 'Filesystem archive verification failed; assignment remains pending'
 
 
 class CourseServiceFilesystemAdapter(HTTPFilesystemAdapter):
@@ -24,14 +30,20 @@ class CourseServiceFilesystemAdapter(HTTPFilesystemAdapter):
 
         results = {}
         for group_id, names in groups.items():
-            response = await self.client.post('/internal/v1/workspaces/archive', json={
-                'workspaces': names, 'actor': actor, 'assignment': assignment,
-            })
-            response.raise_for_status()
-            result = response.json()
+            try:
+                response = await self.client.post('/internal/v1/workspaces/archive', json={
+                    'workspaces': names, 'actor': actor, 'assignment': assignment,
+                })
+                response.raise_for_status()
+            except httpx.HTTPError:
+                raise RuntimeError(_ARCHIVE_VERIFICATION_FAILED) from None
+            try:
+                result = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise RuntimeError(_ARCHIVE_VERIFICATION_FAILED) from None
             if (type(result) is not dict or result.get('read_only_verified') is not True
-                    or not result.get('evidence')):
-                raise StorageError('Archive verification absent')
+                    or type(result.get('evidence')) is not dict or not result['evidence']):
+                raise RuntimeError(_ARCHIVE_VERIFICATION_FAILED)
             results[group_id] = result
 
         if len(results) == 1:
