@@ -326,7 +326,7 @@ class HubJournalTests(unittest.TestCase):
             'authority-schema': 'ALTER TABLE hub_journal_authority ADD COLUMN extra TEXT',
             'marker': 'PRAGMA user_version=0',
             'old-marker': 'PRAGMA user_version=5',
-            'foreign-marker': 'PRAGMA user_version=7',
+            'foreign-marker': 'PRAGMA user_version=8',
             'source-authority-table': 'DROP TABLE pool_source_authority',
             'source-authority-row': 'DELETE FROM pool_source_authority',
             'source-authority-console': "UPDATE pool_source_authority SET console='cit'",

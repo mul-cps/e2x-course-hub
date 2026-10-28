@@ -4,6 +4,13 @@ from tornado import web
 from ..course_service.handlers.base import BaseAPIHandler
 
 class RecordsHandler(BaseAPIHandler):
+    def on_finish(self):
+        if getattr(self,'_managed_shared_lifecycle',False):
+            # The retained shared operation owns its single atomic Source audit.
+            from ..course_service.handlers.base import BaseHandler
+            return BaseHandler.on_finish(self)
+        return super().on_finish()
+
     async def authorize(self, course_id=None, term_id=None, *, read=False):
         user = await self.get_user()
         self._audit_actor = user.username
@@ -95,6 +102,21 @@ class RecordsHandler(BaseAPIHandler):
             if any(w.get('group_id') in groups and w.get('state') != 'stopped' for w in workspaces):
                 raise web.HTTPError(409,reason='Stop affected shared workspace before changing membership')
         try:
+            if (kind=='memberships' and not previous
+                    and getattr(self.settings['course_provider'],'pool_guard',None) is not None
+                    and any(w.get('group_id')==data.get('group_id') for w in workspaces)):
+                provider=self.settings['course_provider']
+                normalized,_=await provider._normalize_record(kind,data,actor=actor)
+                controller=self.settings.get('hub_permission_controller')
+                if controller is None:raise ValueError('Managed shared permission controller unavailable')
+                from .shared_lifecycle import SharedLifecycleController
+                self._managed_shared_lifecycle=True
+                result=await SharedLifecycleController(controller).add(await self.get_user(),
+                    next(w['id'] for w in sorted(workspaces,key=lambda item:item['id']) if w.get('group_id')==data.get('group_id')),normalized)
+                self.set_header('Cache-Control','no-store')
+                self.set_status(200 if result.get('state')=='effective' else 202)
+                self.write({key:result[key] for key in ('state','workspace','operation_id','input_sha256') if key in result})
+                return
             result = await self.settings['course_provider'].put(kind, data, actor=actor)
         except (ValueError, KeyError, TypeError) as error:
             self.settings['course_provider'].denial(actor,kind,str(data.get('id','')),data,'invalid')

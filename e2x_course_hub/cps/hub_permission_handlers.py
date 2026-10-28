@@ -66,6 +66,7 @@ class HubGroupOperationHandler(BaseAPIHandler):
         try:
             data=strict_json(self.request.body)
             fields=({'input_sha256'} if operation_id is not None else
+                {'action','workspace','membership_id'} if type(data) is dict and data.get('action')=='shared-student-remove' else
                 {'action','workspace'} if type(data) is dict and data.get('action') in ('workspace-account-create','workspace-prepare') else
                 {'action','name'} if type(data) is dict and data.get('action')=='user-create' else {'group_id','action'})
             if type(data) is not dict or set(data)!=fields:
@@ -78,7 +79,10 @@ class HubGroupOperationHandler(BaseAPIHandler):
         controller=self.settings[SETTING]
         try:
             if operation_id is None:
-                if data['action']=='workspace-prepare':
+                if data['action']=='shared-student-remove':
+                    from .shared_lifecycle import SharedLifecycleController
+                    result=await SharedLifecycleController(controller).remove(visitor,data['workspace'],data['membership_id'])
+                elif data['action']=='workspace-prepare':
                     service=self.settings.get('workspace_service')
                     if service is None:raise ValueError('Workspace service unavailable')
                     result=await service.prepare_native_approval(data['workspace'],visitor=visitor)

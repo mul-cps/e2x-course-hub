@@ -384,6 +384,9 @@ class HubPermissionController:
         current=await self._actor(visitor)
         if current['name']!=record['actor'] and not current['admin']:
             raise PermissionError('Original visitor or actual console administrator required')
+        if record['intent']['request']['action'] in ('shared-student-remove','shared-student-add'):
+            from .shared_lifecycle import SharedLifecycleController
+            return await SharedLifecycleController(self).run(visitor,record)
         if record['state']=='completed':
             if record['intent']['request']['action']=='workspace-account-create':
                 await self._fresh_neutral(visitor,record['source_preimage'],record['intent']['request'])

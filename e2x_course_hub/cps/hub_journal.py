@@ -89,7 +89,7 @@ def _intent(value):
     # Lazy: the existing compute SDK is an integration dependency of Task 3B.
     from cps_compute.native_pool_hub_effects import validate_hub_intent
     result = validate_hub_intent(value)
-    _require(result['request']['action'] in _GROUP_ACTIONS | {'workspace-account-create'})
+    _require(result['request']['action'] in _GROUP_ACTIONS | {'workspace-account-create','shared-student-remove','shared-student-add'})
     return result
 
 
@@ -169,7 +169,7 @@ class SourceHubJournal:
     def _schema(self):
         from .pool_heads import SOURCE_SCHEMA
         db, binding = self._db, self._binding
-        _require(db.execute('PRAGMA user_version').fetchone()[0] == SOURCE_DATABASE_VERSION)
+        _require(db.execute('PRAGMA user_version').fetchone()[0] in (SOURCE_DATABASE_VERSION,7))
         _require(dict(db.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'hub_journal_*'")) == SOURCE_JOURNAL_SCHEMA)
         _require(dict(db.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'pool_source_*'")) == SOURCE_SCHEMA)
         actual = next(row[2] for row in db.execute('PRAGMA database_list') if row[1] == 'main')
@@ -218,10 +218,16 @@ class SourceHubJournal:
             receipt=None, effect_sha256=None, database_id=binding['coordinator_database_id']))
         if ticket['predecessor'] is not None:
             _digest(ticket['predecessor'])
-        return dict(operation_id=operation_id, input_sha256=input_sha256, intent=intent,
+        record=dict(operation_id=operation_id, input_sha256=input_sha256, intent=intent,
             source_preimage=source_preimage, hub_preimage=hub_preimage, actor=actor,
             ticket=ticket, binding=binding, effect=None, effect_sha256=None, receipt=None,
             audit_rowid=None, audit_time=None)
+        if intent['request']['action'] in ('shared-student-remove','shared-student-add'):
+            from cps_compute.native_pool_shared_effects import source_postimage
+            _require(self._db.execute('PRAGMA user_version').fetchone()[0]==7)
+            source_postimage(source_preimage,intent['request'])
+            record['lifecycle']=dict(version=3,stopped=None,control=None,finalized=None,stops=[])
+        return record
 
     def _effect(self, record, effect, effect_sha256):
         from cps_compute.native_pool_hub_effects import validate_effect_record
@@ -246,6 +252,10 @@ class SourceHubJournal:
                  and all(value[key] == expected for key, expected in context.items()))
         request, before = intent['request'], intent['before']
         action = request['action']
+        if action in ('shared-student-remove','shared-student-add'):
+            from cps_compute.native_pool_shared_effects import shared_result
+            _require(value['result']==shared_result(intent,record['lifecycle']['stopped']))
+            return value
         if action == 'workspace-account-create':
             from cps_compute.native_pool_neutral_effects import validate_neutral_after
             after=validate_neutral_after(intent['console'],request['descriptor'],value.get('result',{}).get('after'))
@@ -274,6 +284,7 @@ class SourceHubJournal:
     def _audit(self, record):
         return (record['actor'], self._binding['console'], 'admin.hub',
                 (record['intent']['request']['binding']['owner'] if record['intent']['request']['action']=='workspace-account-create'
+                 else record['intent']['request']['workspace'] if record['intent']['request']['action'] in ('shared-student-remove','shared-student-add')
                  else record['intent']['request']['name']), _json(record['hub_preimage']),
                 _json(record['receipt']), record['audit_time'], 'success')
 
@@ -285,12 +296,16 @@ class SourceHubJournal:
                 'SELECT operation_id,input_sha256,state,record FROM hub_journal_operation ORDER BY operation_id'):
             _require(type(raw) is str and len(raw.encode('utf-8')) <= 5*_EFFECT_BOUND+_RECEIPT_BOUND)
             record = json.loads(raw)
-            _require(type(record) is dict and set(record) == _RECORD_FIELDS and raw == _json(record))
+            shared=type(record) is dict and record.get('intent',{}).get('request',{}).get('action') in ('shared-student-remove','shared-student-add')
+            _require(type(record) is dict and set(record) == _RECORD_FIELDS|({'lifecycle'} if shared else set()) and raw == _json(record))
             prepared = self._prepared(**{key:record[key] for key in (
                 'operation_id', 'input_sha256', 'intent', 'source_preimage', 'hub_preimage', 'actor', 'ticket')})
             _require((operation_id, input_sha256) == (record['operation_id'], record['input_sha256'])
-                     and record['binding'] == self._binding and state in ('prepared', 'armed', 'completed'))
-            if state == 'prepared':
+                     and record['binding'] == self._binding and state in (('prepared','armed','stopped','hub-completed','control-completed','source-completed','effective') if shared else ('prepared','armed','completed')))
+            if shared:
+                from .shared_journal import validate_record
+                validate_record(self,record,state,prepared)
+            elif state == 'prepared':
                 _require(record == prepared)
             else:
                 self._effect(record, record['effect'], record['effect_sha256'])

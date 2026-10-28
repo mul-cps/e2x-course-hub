@@ -49,6 +49,15 @@ def test_reopened_mixed_v1_v2_journal_retains_exact_originals():
         assert journal.complete(op,ih,receipt=receipt)==completed
         assert journal.read(original.OP,case.input)==old
         assert journal.capture_source()==source
+        # Codec-only reopen coverage, not installation/migration authority. The
+        # genuine fenced generation6->7 maintenance is covered by the paired PG
+        # shared lifecycle. Both historical protocols preserve exact raw bytes.
+        raw_history=list(case.provider.db.iterdump())
+        case.provider.db.execute('PRAGMA user_version=7')
+        journal=case.reopen()
+        assert journal.read(original.OP,case.input)==old
+        assert journal.complete(op,ih,receipt=receipt)==completed
+        assert list(case.provider.db.iterdump())==raw_history
         altered=copy.deepcopy(receipt);altered['result']['after']['runtime_role']['scopes']=[]
         import pytest
         with pytest.raises(ValueError):journal.complete(op,ih,receipt=altered)

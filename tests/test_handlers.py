@@ -44,6 +44,8 @@ class HandlersTest(AsyncHTTPTestCase):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
         class Service:
+            provider = outer.provider
+
             async def get(self,identifier):
                 return next(r for r in await outer.provider.list('workspaces') if r['id']==identifier)
             async def start(self,identifier,**kwargs):
@@ -248,6 +250,20 @@ class HandlersTest(AsyncHTTPTestCase):
                     body=json.dumps({'id':'c', field:'untrusted'}))
                 self.assertEqual(response.code, 400)
         self.assertEqual(self.io_loop.run_sync(self.provider.courses), [])
+
+    def test_direct_membership_delete_requires_controlled_workspace_lifecycle(self):
+        async def seed():
+            await self.provider.put('courses', {'id':'c'}, actor='admin')
+            await self.provider.put('groups', {'id':'g','course_id':'c'}, actor='admin')
+            await self.provider.put('memberships', {'id':'m','course_id':'c','group_id':'g',
+                'person_id':'student'}, actor='admin')
+        self.io_loop.run_sync(seed)
+
+        response = self.fetch('/records/memberships', method='DELETE',
+            body=json.dumps({'id':'m'}), allow_nonstandard_methods=True)
+
+        self.assertEqual(response.code, 405)
+        self.assertEqual(self.io_loop.run_sync(lambda:self.provider.members('c'))[0]['id'], 'm')
 
     def test_membership_mutations_blocked_while_starting_or_reconciling(self):
         async def seed(state):

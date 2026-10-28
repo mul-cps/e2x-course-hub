@@ -14,7 +14,12 @@ def audited_lifecycle(method):
         except Exception:
             if hasattr(self.provider,'denial'):
                 target = identifier.get('id','') if isinstance(identifier,dict) else identifier
-                self.provider.denial(actor,'workspace-lifecycle',target,{'operation':method.__name__},'failure')
+                installation=getattr(self.provider,'managed_installation',None)
+                if installation is not None:
+                    from ..schema.user import User
+                    current=await self.accounts.controller._actor(User(username=actor,admin=False,groups=[]))
+                    installation.record_workspace_denial(self.provider,current['name'],target,method.__name__)
+                else:self.provider.denial(actor,'workspace-lifecycle',target,{'operation':method.__name__},'failure')
             raise
     return wrapped
 
@@ -230,7 +235,12 @@ class WorkspaceService:
     @course_serialized
     async def start(self, identifier, *, actor):
         if getattr(self.provider,'pool_guard',None) is not None:
-            self.provider.pool_guard.deny_uncovered('Managed shared Start awaits full Task3C lifecycle')
+            from .accounts import WorkspaceAccountAdapter
+            if type(self.accounts) is not WorkspaceAccountAdapter:
+                self.provider.pool_guard.deny_uncovered('Installed shared lifecycle controller required')
+            from ..schema.user import User
+            from .shared_lifecycle import SharedLifecycleController
+            return await SharedLifecycleController(self.accounts.controller).start(User(username=actor,admin=False,groups=[]),identifier)
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
             if workspace.get('state','stopped') != 'stopped':
@@ -288,6 +298,12 @@ class WorkspaceService:
     @audited_lifecycle
     @course_serialized
     async def remove_member(self, identifier, membership_id, *, actor):
+        if getattr(self.provider,'pool_guard',None) is not None:
+            from .accounts import WorkspaceAccountAdapter
+            if type(self.accounts) is not WorkspaceAccountAdapter:raise ValueError('Installed shared lifecycle required')
+            from ..schema.user import User
+            from .shared_lifecycle import SharedLifecycleController
+            return await SharedLifecycleController(self.accounts.controller).remove(User(username=actor,admin=False,groups=[]),identifier,membership_id)
         target = await self.get(identifier)
         affected = sorted([w for w in await self.provider.list('workspaces')
                            if w.get('course_id') == target['course_id'] and
@@ -335,6 +351,13 @@ class WorkspaceService:
 
     @audited_lifecycle
     async def close(self, identifier, *, actor, archive=False):
+        if getattr(self.provider,'pool_guard',None) is not None:
+            if archive:raise ValueError('Managed archive requires its full reviewed lifecycle')
+            from .accounts import WorkspaceAccountAdapter
+            if type(self.accounts) is not WorkspaceAccountAdapter:raise ValueError('Installed shared lifecycle required')
+            from ..schema.user import User
+            from .shared_lifecycle import SharedLifecycleController
+            return await SharedLifecycleController(self.accounts.controller).stop(User(username=actor,admin=False,groups=[]),identifier)
         async with self.locks.setdefault(identifier,asyncio.Lock()):
             workspace = await self.get(identifier)
             reservation = await self.compute.reservation_state(identifier)
