@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import sqlite3
 import uuid
@@ -12,6 +13,21 @@ from tornado import web
 
 PROTOCOL = 'e2x-cps-source-runtime-observation/v1'
 MAX_HISTORY = 32
+PAGE_PROTOCOL = 'e2x-cps-source-runtime-history-page/v1'
+_PROCESS = (os.getpid(), str(uuid.uuid4()))
+
+
+def _process_id():
+    # Continuity only, not a Kubernetes process attestation or activation grant.
+    global _PROCESS
+    if _PROCESS[0] != os.getpid():
+        _PROCESS = (os.getpid(), str(uuid.uuid4()))
+    return _PROCESS[1]
+
+
+class HistoryChanged(ValueError):
+    pass
+
 _DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
 _JOURNAL_STATES = frozenset({'prepared', 'armed', 'completed', 'stopped',
     'hub-completed', 'control-completed', 'source-completed', 'effective'})
@@ -49,7 +65,7 @@ def _digest(value):
     return type(value) is str and _DIGEST.fullmatch(value) is not None
 
 
-def _local_observation(provider, console):
+def _local_observation(provider, console, *, page=None):
     from .providers import LocalCourseProvider
     from .pool_heads import PoolMutationRPCGuard, SOURCE_SCHEMA
 
@@ -124,7 +140,7 @@ def _local_observation(provider, console):
             operation_count, operation_hash = _history_ref_hash(
                 _HUB_HISTORY_DOMAIN, (), journal=True)
         truncated = receipt_count > MAX_HISTORY or operation_count > MAX_HISTORY
-        return {
+        result = {
             'source': {'console': console, 'database_id': identity[0][2],
                 'source_path_sha256': 'sha256:' + hashlib.sha256(source_path.encode()).hexdigest(),
                 'user_version': user_version, 'schema_sha256': schema_hash},
@@ -136,15 +152,35 @@ def _local_observation(provider, console):
                 'hub_operation_set_sha256': operation_hash},
             'guard': guard,
         }
+        if page is not None:
+            kind, offset, expected_count, expected_digest = page
+            if kind == 'source_receipts':
+                count, digest = receipt_count, receipt_hash
+                fields, table, identity = ('transition_id', 'input_sha256'), 'pool_source_receipt', 'transition_id'
+            else:
+                count, digest = operation_count, operation_hash
+                fields, table, identity = ('operation_id', 'input_sha256', 'state'), 'hub_journal_operation', 'operation_id'
+            if (count, digest) != (expected_count, expected_digest):
+                raise HistoryChanged('Retained Source history changed')
+            # Both the full-set commitment and this canonical page come from
+            # the same read transaction. SQL identifiers are fixed above.
+            records = [] if count == 0 else [dict(zip(fields, row)) for row in db.execute(
+                'SELECT ' + ','.join(fields) + ' FROM ' + table + ' ORDER BY ' + identity + ' LIMIT ? OFFSET ?',
+                (MAX_HISTORY, offset))]
+            result.pop('retained')
+            result.update(process_id=_process_id(), page=dict(kind=kind, offset=offset,
+                count=count, set_sha256=digest, records=records,
+                next_offset=offset + len(records) if offset + len(records) < count else None))
+        return result
     finally:
         db.rollback()
 
 
-def build_runtime_observation(provider, console):
+def build_runtime_observation(provider, console, *, page=None):
     """Read actual local Source custody and retained history in one SQL snapshot."""
-    local = _local_observation(provider, console)
+    local = _local_observation(provider, console, page=page)
     guard = local.pop('guard')
-    return {'protocol': PROTOCOL, 'version': 1, **local,
+    return {'protocol': PAGE_PROTOCOL if page is not None else PROTOCOL, 'version': 1, **local,
         'writer_guard': {'installed': True, 'binding_valid': True,
             'coordinator': {'database_id': guard.database_id}}}
 
@@ -159,16 +195,33 @@ class RuntimeObservationHandler(web.RequestHandler):
         if (type(token) is not str or not token or any(ord(c) < 33 or ord(c) > 126 for c in token)
                 or console not in ('cps', 'cit')):
             raise web.HTTPError(503, 'Source runtime observation is not configured')
-        if self.request.query or self.request.body:
-            raise web.HTTPError(400, 'Empty bounded observation request required')
+        if self.request.body:
+            raise web.HTTPError(400, 'Empty observation request body required')
         authorization = self.request.headers.get('Authorization', '')
         source = self.request.headers.get('X-CPS-Source', '')
         expected = 'Bearer ' + token
         if (source != console or not hmac.compare_digest(
                 authorization.encode('utf-8'), expected.encode('ascii'))):
             raise web.HTTPError(403, 'Source service authentication required')
+        page = None
+        if self.request.query:
+            args = self.request.query_arguments
+            fields = {'kind', 'offset', 'expected_count', 'expected_set_sha256'}
+            if set(args) != fields or any(len(values) != 1 for values in args.values()):
+                raise web.HTTPError(400, 'Closed retained history page query required')
+            kind, offset, count, digest = (self.get_query_argument(key) for key in
+                ('kind', 'offset', 'expected_count', 'expected_set_sha256'))
+            if (kind not in ('source_receipts', 'hub_operations') or not _digest(digest)
+                    or any(re.fullmatch(r'0|[1-9][0-9]{0,18}', value) is None for value in (offset, count))):
+                raise web.HTTPError(400, 'Canonical retained history page query required')
+            offset, count = int(offset), int(count)
+            if offset % MAX_HISTORY or not (offset < count or offset == count == 0):
+                raise web.HTTPError(400, 'Canonical retained history page offset required')
+            page = kind, offset, count, digest
         try:
-            result = build_runtime_observation(self.settings.get('course_provider'), console)
+            result = build_runtime_observation(self.settings.get('course_provider'), console, page=page)
+        except HistoryChanged:
+            raise web.HTTPError(409, 'Retained Source history changed') from None
         except (ValueError, TypeError, KeyError, sqlite3.Error, OSError):
             raise web.HTTPError(503, 'Source runtime observation unavailable') from None
         self.write(result)
