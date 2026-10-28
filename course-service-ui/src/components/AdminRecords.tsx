@@ -205,6 +205,12 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
   const dialogRef = useRef<HTMLElement>(null);
   const [removeMember, setRemoveMember] = useState<Row | null>(null),
     [membership, setMembership] = useState("");
+  const [workspaceOperations, setWorkspaceOperations] = useState<
+    Record<string, Row>
+  >({});
+  const [workspaceRuntime, setWorkspaceRuntime] = useState<Record<string, Row>>(
+    {},
+  );
   const [confirmation, setConfirmation] = useState<{
     message: string;
     run: () => Promise<void>;
@@ -333,6 +339,48 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
       active = false;
     };
   }, [kind]);
+  useEffect(() => {
+    if (kind !== "workspaces") return;
+    let active = true;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        await Promise.all(
+          records
+            .filter((record) => record.id)
+            .map(async (record) => {
+              const id = String(record.id);
+              try {
+                const result = (await requests.get(
+                  `${config.apiUrl}/workspaces/${encodeURIComponent(id)}/status`,
+                )) as Row;
+                if (active)
+                  setWorkspaceRuntime((current) => ({
+                    ...current,
+                    [id]: (result.runtime as Row | undefined) ?? {},
+                  }));
+              } catch {
+                if (active)
+                  setWorkspaceRuntime((current) => ({
+                    ...current,
+                    [id]: { unavailable: true },
+                  }));
+              }
+            }),
+        );
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [kind, records]);
   async function mutate(run: () => Promise<unknown>, message: string) {
     setBusy(true);
     setError("");
@@ -758,6 +806,53 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                           </details>
                         ) : kind === "workspaces" ? (
                           <>
+                            <span>
+                              Runtime:{" "}
+                              {workspaceRuntime[String(r.id)]?.ready === true
+                                ? "running"
+                                : workspaceRuntime[String(r.id)]?.stopped ===
+                                    true
+                                  ? "stopped"
+                                  : workspaceRuntime[String(r.id)]?.pending
+                                    ? String(
+                                        workspaceRuntime[String(r.id)].pending,
+                                      )
+                                    : "unavailable"}
+                            </span>
+                            {workspaceOperations[String(r.id)] && (
+                              <span>
+                                Operation:{" "}
+                                {String(
+                                  workspaceOperations[String(r.id)].state,
+                                )}
+                              </span>
+                            )}
+                            {workspaceOperations[String(r.id)]?.operation_id &&
+                              workspaceOperations[String(r.id)].state !==
+                                "effective" && (
+                                <button
+                                  disabled={busy}
+                                  onClick={() => {
+                                    const operation =
+                                      workspaceOperations[String(r.id)];
+                                    void mutate(async () => {
+                                      const result = (await requests.post(
+                                        `${config.apiUrl}/local/hub-groups/operations/${encodeURIComponent(String(operation.operation_id))}`,
+                                        {
+                                          input_sha256: operation.input_sha256,
+                                        },
+                                      )) as Row;
+                                      if (result.operation_id && result.state)
+                                        setWorkspaceOperations((current) => ({
+                                          ...current,
+                                          [String(r.id)]: result,
+                                        }));
+                                    }, "Member removal resumed.");
+                                  }}
+                                >
+                                  Resume removal
+                                </button>
+                              )}
                             {["start", "stop"].map((action) => (
                               <button
                                 key={action}
@@ -1130,14 +1225,17 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                void mutate(
-                  () =>
-                    requests.post(
-                      `${config.apiUrl}/workspaces/${encodeURIComponent(String(removeMember.id))}/remove-member`,
-                      { membership_id: membership },
-                    ),
-                  "Member removal requested.",
-                );
+                void mutate(async () => {
+                  const result = (await requests.post(
+                    `${config.apiUrl}/workspaces/${encodeURIComponent(String(removeMember.id))}/remove-member`,
+                    { membership_id: membership },
+                  )) as Row;
+                  if (result.operation_id && result.state)
+                    setWorkspaceOperations((current) => ({
+                      ...current,
+                      [String(removeMember.id)]: result,
+                    }));
+                }, "Member removal requested.");
               }}
             >
               <label>

@@ -549,3 +549,82 @@ test("keyboard skip link and navigation announce destination", async ({
   await expect(page).toHaveTitle("Projects · Compute Platform");
   await expect(page.locator("#main-content")).toBeFocused();
 });
+
+test("workspace removal exposes operation status and supports resuming accepted work", async ({
+  page,
+}) => {
+  const removeResponse = {
+    operation_id: "op-a",
+    input_sha256: "sha-a",
+    state: "accepted",
+  };
+  const resumeResponse = {
+    operation_id: "op-a",
+    input_sha256: "sha-a",
+    state: "effective",
+  };
+  const lifecycleWrites: { path: string; body: Record<string, unknown> }[] = [];
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { pending: "removing" } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/remove-member", async (route) => {
+    lifecycleWrites.push({
+      path: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON(),
+    });
+    await route.fulfill({ json: removeResponse });
+  });
+  await page.route("**/api/local/hub-groups/operations/op-a", async (route) => {
+    lifecycleWrites.push({
+      path: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON(),
+    });
+    await route.fulfill({ json: resumeResponse });
+  });
+
+  await page.goto("/workspaces");
+  await page
+    .getByRole("button", { name: "Remove member", exact: true })
+    .click();
+  await page.getByLabel("Course membership").selectOption("m-alice");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Remove member" })
+    .click();
+
+  await expect(page.getByText("Operation: accepted")).toBeVisible();
+  await expect(page.getByText("Runtime: removing")).toBeVisible();
+  await page.getByRole("button", { name: "Resume removal" }).click();
+  await expect(page.getByText("Operation: effective")).toBeVisible();
+  expect(lifecycleWrites).toEqual([
+    {
+      path: "/api/workspaces/ws-a/remove-member",
+      body: { membership_id: "m-alice" },
+    },
+    {
+      path: "/api/local/hub-groups/operations/op-a",
+      body: { input_sha256: "sha-a" },
+    },
+  ]);
+});
+
+test("workspace status denial stays unavailable and its poll stops after navigation", async ({
+  page,
+}) => {
+  let statusReads = 0;
+  await page.clock.install();
+  await page.route("**/api/workspaces/ws-a/status", async (route) => {
+    statusReads += 1;
+    await route.fulfill({ status: 403, json: { detail: "Forbidden" } });
+  });
+
+  await page.goto("/workspaces");
+  await expect(page.getByText("Runtime: unavailable")).toBeVisible();
+  await expect.poll(() => statusReads).toBe(1);
+  await page.clock.fastForward(3000);
+  await expect.poll(() => statusReads).toBe(2);
+
+  await page.goto("/courses");
+  await page.clock.fastForward(6000);
+  expect(statusReads).toBe(2);
+});
