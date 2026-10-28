@@ -3,8 +3,10 @@ ARG SOURCE_REVISION
 LABEL org.opencontainers.image.source="https://github.com/mul-cps/e2x-course-hub" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       io.cps.archive.base="sha256:d475f8ff0d9c3075e3c995020c95ff16217eed5851b667a371a7510b7645daa2" \
-      io.cps.archive.wheel-sha256="6627480f3b2d927be89f97359fb32280161b279e4cd5fa9f936f1d6f0a6013d2"
+      io.cps.archive.wheel-sha256="a582d48a333d2aaf1eeb8edf5d9fa5041799b8a992baa954a1336c6b389093a5"
 COPY e2x_course_hub-0.1.2-py3-none-any.whl /opt/cps-release/e2x_course_hub-0.1.2-py3-none-any.whl
-RUN python -c "import hashlib; assert hashlib.sha256(open('/opt/cps-release/e2x_course_hub-0.1.2-py3-none-any.whl','rb').read()).hexdigest() == '6627480f3b2d927be89f97359fb32280161b279e4cd5fa9f936f1d6f0a6013d2'" \
+USER 0
+RUN python -c "import hashlib; assert hashlib.sha256(open('/opt/cps-release/e2x_course_hub-0.1.2-py3-none-any.whl','rb').read()).hexdigest() == 'a582d48a333d2aaf1eeb8edf5d9fa5041799b8a992baa954a1336c6b389093a5'" \
  && python -m pip install --no-index --no-deps --no-cache-dir --force-reinstall /opt/cps-release/e2x_course_hub-0.1.2-py3-none-any.whl \
  && python -m pip check
+USER 1000
