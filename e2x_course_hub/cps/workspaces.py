@@ -2,6 +2,7 @@
 import asyncio
 import json
 import math
+import logging
 from functools import wraps
 from contextlib import AsyncExitStack
 from urllib.parse import quote
@@ -198,6 +199,51 @@ class WorkspaceService:
         for record in await self.provider.list('workspaces'):
             if record['id'] == identifier: return record
         raise KeyError(identifier)
+
+    @audited_lifecycle
+    @course_serialized
+    async def reconcile_stopped(self, identifier, *, actor):
+        """Converge a running Source record after an independently confirmed Hub stop."""
+        async with self.locks.setdefault(identifier,asyncio.Lock()):
+            workspace=await self.get(identifier)
+            if (workspace.get('state')!='running' or workspace.get('archive_pending')
+                    or workspace.get('archived')):
+                return
+            expected=self.provider.lifecycle_snapshot(workspace['course_id'],workspace_id=identifier)
+            if await self.hub.server_status(workspace) is not None:
+                return
+
+            async def released():
+                state=await self.compute.reservation_state(identifier)
+                return (isinstance(state,dict) and set(state)=={'workspace','active','attempt'}
+                        and state.get('workspace')==identifier
+                        and state.get('active') is False and state.get('attempt') is None)
+
+            if not await released():
+                return
+            # Reuse the normal endpoint's fresh Hub/Pod/native cleanup checks.
+            # Neither lease age nor the console's stored status releases capacity.
+            await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,
+                                                       actor=actor,attempt=None)
+            await self.hub.assert_stopped(workspace)
+            if not await released():
+                return
+            await self.provider.put('workspaces',{**workspace,'state':'stopped',
+                'notice':'Hub session ended; shutdown and reservation cleanup confirmed. Files retained.'},
+                actor=actor,expected_lifecycle=expected)
+
+    async def reconcile_running(self):
+        for workspace in await self.provider.list('workspaces'):
+            if workspace.get('state')!='running':
+                continue
+            lock=self.locks.get(workspace['id'])
+            if lock is not None and lock.locked():
+                continue
+            try:
+                await asyncio.wait_for(self.reconcile_stopped(workspace['id'],
+                    actor='system:hub-lifecycle'),timeout=10)
+            except Exception:
+                logging.getLogger(__name__).warning('Workspace lifecycle observation unavailable: %s',workspace['id'])
 
     async def _ensure_account(self, workspace, *, actor):
         if self.accounts is None:
@@ -449,7 +495,7 @@ class WorkspaceService:
             try:
                 registration = await self.compute.register_workspace(workspace,members,validation)
                 await self.filesystem.provision(workspace,actor=actor)
-                await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registration)
+                validation = await self.compute.validate_workspace(identifier,members,workspace['profile'],workspace['course_ceiling'],registration)
             except Exception:
                 # No Hub spawn was attempted. Keep bootstrap failures retryable;
                 # an unknown central binding cannot prove a reservation release.
@@ -467,6 +513,16 @@ class WorkspaceService:
                     await asyncio.wait_for(cancellable(workspace,cancellation), timeout=seconds)
                 await asyncio.wait_for(self.hub.replace_shares(workspace,workspace['group_id']),
                                        timeout=remaining())
+                # Hub readiness can race an external Stop. A GPU workspace may
+                # become running only while its central reservation still exists.
+                if validation.get('selected_gpu_memory_gib',0) > 0:
+                    current = await asyncio.wait_for(self.compute.reservation_state(identifier),timeout=remaining())
+                    if (not isinstance(current,dict) or current.get('workspace') != identifier
+                            or current.get('active') is not True
+                            or not isinstance(current.get('attempt'),str) or not current['attempt']):
+                        raise RuntimeError('GPU reservation ended before workspace startup confirmation')
+                if cancellation.is_set():
+                    raise _WorkspaceStartCancelled('Workspace start cancelled before readiness publication')
                 remaining()
             except Exception:
                 # A failed response can still leave a starting server; confirm shutdown first.

@@ -212,8 +212,17 @@ class CourseServiceApp(Application):
         self.log.warning(f"Starting Course Service on port {self.port}")
         self.tornado_application.listen(self.port)
         import asyncio
+        from tornado.ioloop import PeriodicCallback
 
-        asyncio.get_event_loop().run_forever()
+        workspace_service=self.tornado_settings.get("workspace_service")
+        if workspace_service is not None:
+            self.workspace_reconciler=PeriodicCallback(workspace_service.reconcile_running,15000)
+            self.workspace_reconciler.start()
+        try:
+            asyncio.get_event_loop().run_forever()
+        finally:
+            if workspace_service is not None:
+                self.workspace_reconciler.stop()
 
 
 if __name__ == "__main__":

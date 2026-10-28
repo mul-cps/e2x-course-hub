@@ -42,6 +42,7 @@ Issues = "https://github.com/Digiklausur/e2x-course-hub/issues"
 Source = "https://github.com/Digiklausur/e2x-course-hub"
 
 [project.optional-dependencies]
+compute-storage = ["cps-compute>=0.1.0,<0.2"]
 dev = [
   "pre-commit",
   "ruff",
@@ -79,7 +80,7 @@ path = "course-service-ui"
 github_url = "https://github.com/Digiklausur/e2x-course-hub"
 
 [tool.tbump.version]
-current = "0.1.1"
+current = "0.1.2"
 regex = '''
   (?P<major>\d+)
   \.

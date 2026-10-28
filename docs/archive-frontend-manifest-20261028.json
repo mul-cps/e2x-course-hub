@@ -1,0 +1,8 @@
+{
+  "templates/kubespawner/form.html": "093170843cc27402771d9121426afb6f4a5f5ef9ad7abe2e84d07bfe9f1ff227",
+  "templates/jupyterhub/spawn.html": "2af3c3f3167860e07293e56aaf5a7050a39db1d37743cad3387b519d2de0d6b6",
+  "templates/course_service/react_base.j2": "b4ebe6c4e9cd6c059bf11a01df5ed75bdef89a0ac51aede8c0f5c1a20458693c",
+  "static/course-service-ui/main.js": "ccf499b7e35b460cbbc082a674975056145c3d3ad2d93b7851fce717bb9a2cad",
+  "static/course-service-ui/assets/favicon.ico": "346bb4a51cb62e15d6b90f1780a6b553ccdcd385e050c83f7d9d3d5640ed2071",
+  "static/course-service-ui/assets/main.css": "48e97b74a6732cf41a18b914e1f107b5fc6a9e23d9f6ef38fcb97b9a653526e1"
+}
