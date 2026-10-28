@@ -18,6 +18,8 @@ class HandlersTest(AsyncHTTPTestCase):
         self.admin = True
         self.groups = []
         self.hub_failure = False
+        self.pending_operations = []
+        self.pending_operation_calls = 0
         outer = self
         class Hub:
             async def get_user(self,name): return {'admin':outer.admin,'groups':outer.groups}
@@ -43,8 +45,13 @@ class HandlersTest(AsyncHTTPTestCase):
         class Identity(IdentityMappingHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
+        async def pending_workspace_removals(visitor, workspace):
+            outer.pending_operation_calls += 1
+            return list(outer.pending_operations)
+        outer.pending_workspace_removals = pending_workspace_removals
         class Service:
             provider = outer.provider
+            accounts = NS(controller=NS(pending_workspace_removals=outer.pending_workspace_removals))
 
             async def get(self,identifier):
                 return next(r for r in await outer.provider.list('workspaces') if r['id']==identifier)
@@ -53,7 +60,7 @@ class HandlersTest(AsyncHTTPTestCase):
                 record=await self.get(identifier)
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
-            (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member)',Workspace),
+            (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member|status|operations)',Workspace),
             (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
@@ -148,6 +155,31 @@ class HandlersTest(AsyncHTTPTestCase):
         records=self.io_loop.run_sync(lambda:self.provider.list('memberships'))
         self.assertEqual(records[0]['person_id'],'alice')
         self.assertEqual(records[0]['course_id'],'a')
+
+    def test_workspace_operation_discovery_is_read_only_and_no_store(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'course'},actor='admin')
+            await self.provider.put('terms',{'id':'term','course_id':'course'},actor='admin')
+            await self.provider.put('groups',{'id':'group','course_id':'course','term_id':'term'},actor='admin')
+            await self.provider.put('workspaces',{'id':'workspace','course_id':'course','term_id':'term',
+                'group_id':'group','state':'stopped'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.pending_operations=[dict(operation_id='44444444-4444-4444-8444-444444444444',
+            input_sha256='sha256:'+'a'*64,state='prepared')]
+        before=self.provider.db.total_changes
+        response=self.fetch('/workspace/workspace/operations')
+        self.assertEqual(response.code,200)
+        self.assertEqual(response.headers['Cache-Control'],'no-store')
+        self.assertEqual(json.loads(response.body),{'operations':self.pending_operations})
+        self.assertEqual(self.provider.db.total_changes,before)
+        self.assertEqual(self.fetch('/workspace/workspace/operations?actor=admin').code,400)
+        calls=self.pending_operation_calls
+        self.admin=False
+        self.groups=[]
+        self.assertEqual(self.fetch('/workspace/workspace/operations').code,403)
+        self.assertEqual(self.pending_operation_calls,calls)
+        self.groups=['lms.course.course.course-owner']
+        self.assertEqual(self.fetch('/workspace/workspace/operations').code,200)
 
     def test_instructor_course_term_crud_assignment_and_workspace_scope(self):
         async def seed():

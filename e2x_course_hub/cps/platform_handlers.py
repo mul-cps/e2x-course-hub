@@ -46,13 +46,24 @@ class WorkspaceHandler(RecordsHandler):
 
     @web.authenticated
     async def get(self,identifier,action):
-        if action!='status':raise web.HTTPError(405)
+        if action not in ('status','operations'):raise web.HTTPError(405)
         service=self.settings.get('workspace_service')
         if service is None:raise web.HTTPError(503)
         workspace=await service.get(identifier)
         await self.authorize(workspace['course_id'],workspace.get('term_id'),read=True)
         controller=getattr(getattr(service,'accounts',None),'controller',None)
         if controller is None:raise web.HTTPError(503,reason='Managed runtime observer unavailable')
+        if action=='operations':
+            if self.request.query:raise web.HTTPError(400,reason='No operation discovery query fields accepted')
+            try:
+                operations=await controller.pending_workspace_removals(await self.get_user(),identifier)
+            except PermissionError:
+                raise web.HTTPError(403,reason='Fresh authenticated Hub identity required') from None
+            except (ValueError,KeyError,TypeError):
+                raise web.HTTPError(409,reason='Retained workspace operation unavailable') from None
+            self.set_header('Cache-Control','no-store')
+            self.write({'operations':operations})
+            return
         from urllib.parse import quote
         user=await controller._hub('users/'+quote(workspace['hub_user'],safe='')+'?include_stopped_servers=true')
         server=user.get('servers',{}).get(workspace['hub_server'])
@@ -145,7 +156,7 @@ class AssignmentHandler(RecordsHandler):
 default_handlers = [
     (r'/api/compute',ComputeHandler),
     (r'/api/assignments/allocate',AssignmentHandler),
-    (r'/api/workspaces/([^/]+)/(start|stop|remove-member|status)',WorkspaceHandler),
+    (r'/api/workspaces/([^/]+)/(start|stop|remove-member|status|operations)',WorkspaceHandler),
 ]
 
 class WorkspaceCreateHandler(RecordsHandler):

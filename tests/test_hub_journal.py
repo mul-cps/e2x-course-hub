@@ -1,5 +1,6 @@
 """Persistent internal journal: custody, retries and atomic local completion."""
 import copy
+import asyncio
 import hashlib
 import importlib
 import json
@@ -378,6 +379,130 @@ class HubJournalTests(unittest.TestCase):
                 receipt = dict(self.receipt, transition_id=operation_id, input_sha256=input_hash,
                     effect_sha256=effect_hash, result=dict(action=action, before=plan['before'], after=after))
                 self.assertEqual(journal.complete(operation_id, input_hash, receipt=receipt)['receipt'], receipt)
+
+    def test_shared_removal_journal_fixture_uses_strict_codec_and_real_sql(self):
+        journal = self.provision()
+        db = self.provider.db
+        db.execute('PRAGMA user_version=7')
+        from cps_compute.native_groups import canonical_sha256
+        from cps_compute.native_pool_neutral_effects import descriptor, control_scopes, runtime_scopes
+        from cps_compute.native_gpu_runtime import native_spec_sha256
+
+        workspace, course, term, group = 'shared-workspace', 'course', 'term', 'shared-group'
+        descriptor_body = dict(workspace=workspace, course=course, term=term, group=group,
+            server='rtc', namespace='jupyterhub', pod='jupyter-workspace')
+        owner = descriptor('cps', descriptor_body)
+        pod_uid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+        generation = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+        group_incarnation = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        control_incarnation = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+        runtime_incarnation = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+        people = [DB, INSTALLATION]
+        roster_before = [
+            dict(membership_id='member-a', username='student-a', canonical_person_id=people[0]),
+            dict(membership_id='member-b', username='student-b', canonical_person_id=people[1]),
+        ]
+        roster_after = [roster_before[1]]
+        registration_obj = dict(workspace=workspace, owner=owner, server='rtc', group_id=group, members=people)
+        registration = canonical(registration_obj)
+        pod = dict(apiVersion='v1', kind='Pod', metadata=dict(namespace='jupyterhub', name='jupyter-workspace', uid=pod_uid),
+            spec=dict(containers=[dict(name='server', image='example.invalid/server')]))
+        spec_sha = native_spec_sha256(pod)
+        writer = dict(kind='cpu', workspace=workspace, descriptor=descriptor_body, owner=owner, pod_uid=pod_uid,
+            registration=registration, spawn=dict(version=1, generation=generation, mode='none', workspace=workspace,
+                owner=owner, server='rtc', pod=dict(namespace='jupyterhub', name='jupyter-workspace', uid=pod_uid),
+                spec_sha256=spec_sha, unbound=False), cpu_spawn=dict(version=1, generation=generation,
+                workspace=workspace, registration_sha256=canonical_sha256(registration_obj), owner=owner, server='rtc',
+                pod=dict(namespace='jupyterhub', name='jupyter-workspace', uid=pod_uid), spec_sha256=spec_sha, unbound=False), pod=pod)
+
+        hub_group = dict(id=41, name=group, users=['student-a', 'student-b'], roles=[],
+            properties={'cps_workspace_incarnation': group_incarnation}, custody=dict(name=group, source='cps',
+            course=course, term=term, hub_group_id=41, incarnation=group_incarnation))
+        authority = dict(service=dict(id=1, name='cps-admin'), kernel_group=dict(id=2, name='cps-workspace-kernel-accounts'),
+            kernel_role=dict(id=3, name='cps-workspace-kernel'))
+        receipt = dict(version=1, kind='hub_neutral_creation', source='cps', workspace=workspace, owner=owner,
+            descriptor_hash=canonical_sha256(dict(source='cps', **descriptor_body)).removeprefix('sha256:'),
+            group='cps-workspace-kernel-accounts', role='cps-workspace-kernel',
+            identity=dict(id=51, name=owner, created='2026-01-01T00:00:00Z'))
+        controls = dict(owner=owner, hub_service_id=1, hub_role_id=61, incarnation=control_incarnation,
+            hub_runtime_role_id=62, runtime_incarnation=runtime_incarnation)
+        control_role = dict(id=61, name='cps-workspace-control-'+owner, scopes=control_scopes(owner, descriptor_body),
+            managed_by_auth=False, groups=[], description='Permanent Source custody '+control_incarnation, users=[], services=[1])
+        runtime_role = dict(id=62, name='cps-workspace-runtime-'+owner, scopes=runtime_scopes(owner, descriptor_body),
+            managed_by_auth=False, groups=[], description='Permanent kernel runtime '+runtime_incarnation, users=[51], services=[])
+        owner_after = dict(id=51, name=owner, admin=False, roles=[3, 62], groups=[2])
+        account = dict(receipt=receipt, authority=authority, course_group=hub_group, controls=controls,
+            control_role=control_role, runtime_role=runtime_role, owner=owner_after)
+        before = dict(group=hub_group, accounts=[account], shares=[dict(id=71, owner_id=51, spawner_id=81,
+            group_id=41, user_id=None, scopes=['access:servers!server='+owner+'/rtc'], expires_at=None)],
+            spawners=[dict(id=81, owner_id=51, name='rtc')])
+
+        membership_a = dict(id='member-a', person_id='student-a', canonical_person_id=people[0], group_id=group,
+            course_id=course, term_id=term, role='student', source='local', external_id=None)
+        membership_b = dict(id='member-b', person_id='student-b', canonical_person_id=people[1], group_id=group,
+            course_id=course, term_id=term, role='student', source='local', external_id=None)
+        workspace_row = dict(id=workspace, course_id=course, term_id=term, group_id=group, hub_user=owner,
+            hub_server='rtc', source='local', state='running')
+        stopped = dict(workspace_row, state='stopped', notice='Membership changed; kernel interrupted. Files retained. Profile must be revalidated before restart.')
+        group_row = dict(id=group, course_id=course, term_id=term, role='student', members=['student-a', 'student-b'])
+        group_after = dict(group_row, members=['student-b'])
+        records = [
+            ('memberships', 'member-a', canonical(membership_a)), ('memberships', 'member-b', canonical(membership_b)),
+            ('groups', group, canonical(group_row)), ('workspaces', workspace, canonical(workspace_row)),
+        ]
+        with db:
+            for kind, identifier, payload in records:
+                db.execute('INSERT INTO records VALUES(?,?,?,?)', ('cps', kind, identifier, payload))
+        source = journal.capture_source()
+        request = dict(action='shared-student-remove', workspace=workspace, membership_id='member-a', course=course,
+            term=term, group=group, roster_before=roster_before, roster_after=roster_after, writers=[writer],
+            source_changes=[
+                dict(kind='groups', id=group, before=canonical(group_row), after=canonical(group_after)),
+                dict(kind='memberships', id='member-a', before=canonical(membership_a), after=None),
+                dict(kind='workspaces', id=workspace, before=canonical(workspace_row), after=canonical(stopped)),
+            ])
+        intent = dict(console='cps', actor='course-admin', hub_api=HUB, request=request, before=before,
+            source_revision=canonical_sha256(source))
+        input_hash = canonical_sha256(dict(operation='admin.hub', payload=intent))
+        ticket = dict(self.ticket, input_sha256=input_hash)
+        record = journal.prepare(operation_id=OP, input_sha256=input_hash, intent=intent,
+            source_preimage=source, hub_preimage=before, actor='course-admin', ticket=ticket)
+        self.assertEqual(record['state'], 'prepared')
+        self.assertEqual(journal.read(OP, input_hash)['intent']['request']['action'], 'shared-student-remove')
+        from e2x_course_hub.cps.compute import ComputePolicyClient
+        from e2x_course_hub.cps.hub_permissions import HubPermissionController, SourceJournalBinding
+        from e2x_course_hub.cps.pool_heads import PoolMutationRPCGuard
+        from e2x_course_hub.schema.user import User
+        from e2x_course_hub.api.hub_api import HubAPI
+        from unittest.mock import patch
+        client = ComputePolicyClient(ORIGIN, 'test-token', 'cps')
+        guard = PoolMutationRPCGuard(client, database_id=DB)
+        self.provider.pool_guard = guard
+        binding = SourceJournalBinding(**self.pins)
+        hub = HubAPI(api_url=HUB, api_token='test-token')
+        controller = HubPermissionController(self.provider, guard, binding, hub)
+        before_sql = list(db.iterdump())
+        before_changes = db.total_changes
+
+        async def fresh_hub(path, **kwargs):
+            return dict(name='course-admin', admin=False, groups=[])
+
+        with patch.object(controller, '_hub', side_effect=fresh_hub):
+            operations = asyncio.run(controller.pending_workspace_removals(
+                User(username='course-admin', admin=False, groups=[]), workspace))
+        self.assertEqual(operations, [dict(operation_id=OP, input_sha256=input_hash, state='prepared')])
+        async def unrelated_user(path, **kwargs):
+            return dict(name='another-instructor', admin=False, groups=[])
+        with patch.object(controller, '_hub', side_effect=unrelated_user):
+            self.assertEqual(asyncio.run(controller.pending_workspace_removals(
+                User(username='another-instructor', admin=False, groups=[]), workspace)), [])
+        async def fresh_admin(path, **kwargs):
+            return dict(name='current-admin', admin=True, groups=[])
+        with patch.object(controller, '_hub', side_effect=fresh_admin):
+            self.assertEqual(asyncio.run(controller.pending_workspace_removals(
+                User(username='current-admin', admin=False, groups=[]), workspace)), operations)
+        self.assertEqual(list(db.iterdump()), before_sql)
+        self.assertEqual(db.total_changes, before_changes)
 
     def test_large_total_history_is_streamed_not_capped_as_one_record(self):
         journal = self.provision()

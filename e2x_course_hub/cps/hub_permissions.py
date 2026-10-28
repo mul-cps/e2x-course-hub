@@ -144,6 +144,23 @@ class HubPermissionController:
             raise PermissionError('Fresh authenticated Hub visitor required')
         return current
 
+    async def pending_workspace_removals(self, visitor, workspace):
+        """Return sanitized retained removals visible to their original actor or a fresh admin."""
+        _sdk().name(workspace)
+        self._clean()
+        current=await self._actor(visitor)
+        visible=[]
+        for record in self.journal.read_all():
+            request=record['intent']['request']
+            if (request.get('action')!='shared-student-remove' or request.get('workspace')!=workspace
+                or record['state']=='effective'):
+                continue
+            if not current['admin'] and record['actor']!=current['name']:
+                continue
+            visible.append(dict(operation_id=record['operation_id'],input_sha256=record['input_sha256'],
+                state=record['state']))
+        return visible
+
     def _source(self,group_id,action,current):
         from .expiry import active,effective_groups
         from .authorization import checker,Permission

@@ -563,9 +563,13 @@ test("workspace removal exposes operation status and supports resuming accepted 
     input_sha256: "sha-a",
     state: "effective",
   };
+  let discovered: Record<string, unknown>[] = [removeResponse];
   const lifecycleWrites: { path: string; body: Record<string, unknown> }[] = [];
   await page.route("**/api/workspaces/ws-a/status", (route) =>
     route.fulfill({ json: { runtime: { pending: "removing" } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", (route) =>
+    route.fulfill({ json: { operations: discovered } }),
   );
   await page.route("**/api/workspaces/ws-a/remove-member", async (route) => {
     lifecycleWrites.push({
@@ -579,6 +583,7 @@ test("workspace removal exposes operation status and supports resuming accepted 
       path: new URL(route.request().url()).pathname,
       body: route.request().postDataJSON(),
     });
+    discovered = [];
     await route.fulfill({ json: resumeResponse });
   });
 
@@ -606,6 +611,87 @@ test("workspace removal exposes operation status and supports resuming accepted 
       body: { input_sha256: "sha-a" },
     },
   ]);
+});
+
+test("workspace reload discovers retained removal and resumes with journal hash", async ({
+  page,
+}) => {
+  const requests: {
+    method: string;
+    path: string;
+    body?: Record<string, unknown>;
+  }[] = [];
+  let discovered: Record<string, unknown>[] = [
+    {
+      operation_id: "op-reloaded",
+      input_sha256: "sha-reloaded",
+      state: "prepared",
+    },
+  ];
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { stopped: true } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", async (route) => {
+    requests.push({
+      method: route.request().method(),
+      path: new URL(route.request().url()).pathname,
+    });
+    await route.fulfill({ json: { operations: discovered } });
+  });
+  await page.route(
+    "**/api/local/hub-groups/operations/op-reloaded",
+    async (route) => {
+      requests.push({
+        method: route.request().method(),
+        path: new URL(route.request().url()).pathname,
+        body: route.request().postDataJSON(),
+      });
+      discovered = [];
+      await route.fulfill({
+        json: {
+          operation_id: "op-reloaded",
+          input_sha256: "sha-reloaded",
+          state: "effective",
+        },
+      });
+    },
+  );
+
+  await page.goto("/workspaces");
+  await expect(page.getByText("Operation: prepared")).toBeVisible();
+  await page.getByRole("button", { name: "Resume removal" }).click();
+  await expect(page.getByText("Operation: effective")).toBeVisible();
+  expect(requests).toEqual([
+    { method: "GET", path: "/api/workspaces/ws-a/operations" },
+    {
+      method: "POST",
+      path: "/api/local/hub-groups/operations/op-reloaded",
+      body: { input_sha256: "sha-reloaded" },
+    },
+    { method: "GET", path: "/api/workspaces/ws-a/operations" },
+  ]);
+});
+
+test("denied workspace operation discovery exposes no recovery mutation", async ({
+  page,
+}) => {
+  let recoveryWrites = 0;
+  await page.route("**/api/workspaces/ws-a/status", (route) =>
+    route.fulfill({ json: { runtime: { stopped: true } } }),
+  );
+  await page.route("**/api/workspaces/ws-a/operations", (route) =>
+    route.fulfill({ status: 403, json: { detail: "Forbidden" } }),
+  );
+  await page.route("**/api/local/hub-groups/operations/**", async (route) => {
+    recoveryWrites += 1;
+    await route.fulfill({ json: {} });
+  });
+  await page.goto("/workspaces");
+  await expect(page.getByText("Runtime: stopped")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Resume removal" }),
+  ).toHaveCount(0);
+  expect(recoveryWrites).toBe(0);
 });
 
 test("workspace status denial stays unavailable and its poll stops after navigation", async ({

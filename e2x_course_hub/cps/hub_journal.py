@@ -365,6 +365,13 @@ class SourceHubJournal:
             self._validate()
             return self._find(operation_id, input_sha256)
 
+    def read_all(self):
+        """Return detached retained records after one complete history validation."""
+        with self._transaction():
+            self._validate()
+            return [dict(json.loads(raw), state=state) for _, _, state, raw in self._db.execute(
+                'SELECT operation_id,input_sha256,state,record FROM hub_journal_operation ORDER BY operation_id')]
+
     def prepare(self, *, operation_id, input_sha256, intent, source_preimage,
                 hub_preimage, actor, ticket):
         """Persist exact local intent BEFORE retaining the global Hub effect."""

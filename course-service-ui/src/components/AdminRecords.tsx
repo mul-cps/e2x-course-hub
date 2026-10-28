@@ -343,6 +343,44 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
     if (kind !== "workspaces") return;
     let active = true;
     let polling = false;
+    const discover = async () => {
+      await Promise.all(
+        records
+          .filter((record) => record.id)
+          .map(async (record) => {
+            const id = String(record.id);
+            try {
+              const discovery = (await requests.get(
+                `${config.apiUrl}/workspaces/${encodeURIComponent(id)}/operations`,
+              )) as Row;
+              const operations = Array.isArray(discovery.operations)
+                ? (discovery.operations as Row[])
+                : [];
+              if (active)
+                setWorkspaceOperations((current) => {
+                  const next = { ...current };
+                  const previous = current[id];
+                  if (operations.length && operations[0].operation_id) {
+                    const discovered = operations[0];
+                    next[id] =
+                      previous?.operation_id === discovered.operation_id &&
+                      previous.state === "effective"
+                        ? previous
+                        : discovered;
+                  } else if (previous?.state !== "effective") delete next[id];
+                  return next;
+                });
+            } catch {
+              if (active)
+                setWorkspaceOperations((current) => {
+                  const next = { ...current };
+                  delete next[id];
+                  return next;
+                });
+            }
+          }),
+      );
+    };
     const poll = async () => {
       if (polling) return;
       polling = true;
@@ -374,6 +412,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
         polling = false;
       }
     };
+    void discover();
     void poll();
     const timer = window.setInterval(() => void poll(), 3000);
     return () => {
