@@ -319,6 +319,36 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
             await self.service.close_assignment(assignment,actor='teacher')
         self.assertNotIn('archive',self.calls)
 
+    async def test_central_archive_adapter_completes_only_with_verified_evidence(self):
+        from e2x_course_hub.cps.accounts import CentralWorkspaceFilesystemAdapter
+        assignment=(await self.provider.list('assignments'))[0]
+        async def archive(names, *, actor, assignment=None):
+            self.calls.append('archive')
+            self.assertEqual(names, ['w'])
+            self.assertEqual(actor, 'teacher')
+            self.assertEqual(assignment['id'], 'a')
+            return {'state':'archived','read_only_verified':True,'evidence':{'nas':'retained'}}
+        self.service.compute.archive_workspaces=archive
+        self.service.filesystem=CentralWorkspaceFilesystemAdapter(self.service.compute)
+        result=await self.service.close_assignment(assignment,actor='teacher')
+        self.assertTrue(result['archived'])
+        self.assertEqual(result['archive_evidence']['evidence']['nas'],'retained')
+        self.assertLess(self.calls.index('stop:w'),self.calls.index('archive'))
+
+    async def test_central_archive_adapter_never_claims_unverified_archive(self):
+        from e2x_course_hub.cps.accounts import CentralWorkspaceFilesystemAdapter
+        assignment=(await self.provider.list('assignments'))[0]
+        async def archive(*args, **kwargs):
+            self.calls.append('archive')
+            return {'state':'archived','read_only_verified':False,'evidence':{'nas':'unverified'}}
+        self.service.compute.archive_workspaces=archive
+        self.service.filesystem=CentralWorkspaceFilesystemAdapter(self.service.compute)
+        with self.assertRaisesRegex(ValueError,'archive verification'):
+            await self.service.close_assignment(assignment,actor='teacher')
+        saved=await self.service.get('w')
+        self.assertTrue(saved['archive_pending'])
+        self.assertFalse(saved.get('archived',False))
+
     async def test_fake_source_uses_same_access_sink_without_provider_mutations(self):
         before = {kind: await self.provider.list(kind)
                   for kind in ('courses', 'memberships', 'groups', 'groupings', 'workspaces')}

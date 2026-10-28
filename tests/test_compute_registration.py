@@ -43,3 +43,22 @@ class WorkspaceRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'namespace': 'jupyterhub', 'pod': 'preserved-old',
             'policy_hash': 'reviewed-hash',
         })
+
+    async def test_assignment_archive_uses_the_closed_verified_storage_route(self):
+        client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+        client._request = AsyncMock(return_value={
+            'state': 'archived', 'read_only_verified': True, 'evidence': {'nas': 'retained'}})
+        result = await client.archive_workspaces(['workspace-a', 'workspace-b'],
+            actor='course-admin', assignment={'id': 'assignment-a'})
+        self.assertEqual(result['read_only_verified'], True)
+        client._request.assert_awaited_once_with('workspaces/archive', 'POST', {
+            'workspaces': ['workspace-a', 'workspace-b'], 'actor': 'course-admin',
+            'assignment': {'id': 'assignment-a'},
+        })
+
+    async def test_assignment_archive_rejects_missing_verification(self):
+        client = ComputePolicyClient('https://internal.example', 'fixture-token', 'cps')
+        client._request = AsyncMock(return_value={
+            'state': 'archived', 'read_only_verified': False, 'evidence': {'nas': 'retained'}})
+        with self.assertRaisesRegex(ValueError, 'archive verification'):
+            await client.archive_workspaces(['workspace-a'], actor='course-admin')

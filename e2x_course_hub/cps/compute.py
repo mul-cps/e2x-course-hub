@@ -69,7 +69,7 @@ class ComputePolicyClient:
         self._http_client_factory=http_client_factory
 
     async def _request(self,path,method='GET',payload=None,*,absent=False):
-        fixed={('profiles','GET'),('grants','PUT'),('workspaces','PUT'),('workspaces/provision','POST'),('reservations/release','POST'),
+        fixed={('profiles','GET'),('grants','PUT'),('workspaces','PUT'),('workspaces/provision','POST'),('workspaces/archive','POST'),('reservations/release','POST'),
             ('workspace-policy/preview','POST'),('workspace-policy','POST'),
             ('native-pool-head/current','GET'),('native-pool-head/migration-permit','GET'),
             ('native-pool-head/prepare-write','POST'),('native-pool-head/complete-write','POST'),
@@ -102,6 +102,19 @@ class ComputePolicyClient:
 
     async def provision_workspace(self, workspace):
         return await self._request('workspaces/provision','POST',{'workspace':workspace})
+
+    async def archive_workspaces(self, workspaces, *, actor, assignment=None):
+        if (type(workspaces) is not list or not workspaces
+                or any(type(name) is not str or not name.strip() for name in workspaces)
+                or len(set(workspaces)) != len(workspaces)
+                or type(actor) is not str or not actor.strip()):
+            raise ValueError('Exact workspace archive request required')
+        result = await self._request('workspaces/archive', 'POST', {
+            'workspaces': workspaces, 'actor': actor, 'assignment': assignment})
+        if (type(result) is not dict or result.get('read_only_verified') is not True
+                or not result.get('evidence')):
+            raise ValueError('Read-only archive verification required')
+        return result
 
     async def register_workspace(self, workspace, members, validation):
         required = ('namespace', 'pod')

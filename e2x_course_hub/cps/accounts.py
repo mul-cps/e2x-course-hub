@@ -19,11 +19,20 @@ class WorkspaceAccountAdapter:
 
 
 class CentralWorkspaceFilesystemAdapter:
-    """Only the existing central provision route; no local mount/permission writes."""
+    """Use central storage routes only; never mount, delete, or rewrite files locally."""
     def __init__(self, compute):self.compute=compute
 
     async def provision(self, workspace, *, actor):
         return await self.compute.provision_workspace(workspace['id'])
 
-    async def archive(self, *args, **kwargs):
-        raise ValueError('Managed shared archive lifecycle is not qualified')
+    async def archive(self, workspaces, *, actor, assignment=None):
+        if (type(workspaces) is not list or not workspaces
+                or any(type(workspace) is not dict or type(workspace.get('id')) is not str
+                    or not workspace['id'].strip() for workspace in workspaces)):
+            raise ValueError('Exact retained workspace archive targets required')
+        result = await self.compute.archive_workspaces(
+            [workspace['id'] for workspace in workspaces], actor=actor, assignment=assignment)
+        if (type(result) is not dict or result.get('read_only_verified') is not True
+                or not result.get('evidence')):
+            raise ValueError('Read-only archive verification required')
+        return result

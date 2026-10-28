@@ -209,6 +209,11 @@ class AssignmentCloseHandler(RecordsHandler):
             result = await service.close_assignment(assignment,actor=actor)
         except RuntimeError as error:
             raise web.HTTPError(503,reason=str(error))
+        except ValueError as error:
+            if str(error) != 'Read-only archive verification required':
+                raise
+            raise web.HTTPError(409,
+                reason='Read-only archive verification failed; assignment remains pending') from None
         except (TimeoutError,HTTPClientError) as error:
             raise web.HTTPError(409,reason='Writer shutdown or reservation release not confirmed')
         self.write({'assignment':result,'notice':'Verified read-only archive; files retained.'})

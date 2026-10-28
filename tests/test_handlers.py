@@ -20,6 +20,7 @@ class HandlersTest(AsyncHTTPTestCase):
         self.hub_failure = False
         self.pending_operations = []
         self.pending_operation_calls = 0
+        self.archive_verification_failure = False
         outer = self
         class Hub:
             async def get_user(self,name): return {'admin':outer.admin,'groups':outer.groups}
@@ -32,8 +33,11 @@ class HandlersTest(AsyncHTTPTestCase):
             def get_current_user(self): return {'name':'admin','admin':True}
             async def get_user(self): return User(username='admin',admin=True,groups=[])
         self.record_handler=Records
-        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
+        from e2x_course_hub.cps.platform_handlers import AssignmentHandler, AssignmentCloseHandler, WorkspaceHandler, ComputeHandler, IdentityMappingHandler
         class Assignment(AssignmentHandler):
+            get_current_user=Records.get_current_user
+            get_user=Records.get_user
+        class AssignmentClose(AssignmentCloseHandler):
             get_current_user=Records.get_current_user
             get_user=Records.get_user
         class Workspace(WorkspaceHandler):
@@ -59,8 +63,13 @@ class HandlersTest(AsyncHTTPTestCase):
                 if outer.hub_failure:raise RuntimeError('Hub unavailable')
                 record=await self.get(identifier)
                 await outer.provider.put('workspaces',{**record,'state':'running'},actor=kwargs['actor'])
+            async def close_assignment(self,assignment,*,actor):
+                if outer.archive_verification_failure:
+                    raise ValueError('Read-only archive verification required')
+                return {**assignment,'state':'closed','archived':True}
         return web.Application([(r'/proxy/(.*)',Proxy),(r'/records/(.*)',Records),
-            (r'/assignment',Assignment),(r'/workspace/([^/]+)/(start|stop|remove-member|status|operations)',Workspace),
+            (r'/assignment',Assignment),(r'/assignment-close/([^/]+)',AssignmentClose),
+            (r'/workspace/([^/]+)/(start|stop|remove-member|status|operations)',Workspace),
             (r'/compute',Compute),(r'/identities',Identity)],workspace_service=Service(),
             last_config_check=time.time(),course_provider=self.provider,api=NS(course_api=NS(hub_api=Hub())),
             compute_gateway_url='https://gateway.example',console_owner='cps',cookie_secret='test')
@@ -227,6 +236,16 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(len(entries),4)
         self.assertEqual([r['outcome'] for r in entries],['invalid','invalid','failure','denied'])
         self.assertTrue(all(r['actor']=='admin' and r['time'] and r['previous'] is not None and r['current'] is not None for r in entries))
+
+    def test_unverified_assignment_archive_returns_actionable_conflict(self):
+        async def seed():
+            await self.provider.put('courses',{'id':'c'},actor='admin')
+            await self.provider.put('assignments',{'id':'a','course_id':'c','mode':'manual','source':'local'},actor='admin')
+        self.io_loop.run_sync(seed)
+        self.archive_verification_failure=True
+        response=self.fetch('/assignment-close/a',method='POST',body='{}')
+        self.assertEqual(response.code,409)
+        self.assertIn(b'archive verification failed',response.body.lower())
 
     def test_expired_teaching_membership_surviving_login_is_no_longer_effective(self):
         group='lms.course.c.term.t.instructor'
