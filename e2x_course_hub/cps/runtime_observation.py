@@ -15,6 +15,27 @@ MAX_HISTORY = 32
 _DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
 _JOURNAL_STATES = frozenset({'prepared', 'armed', 'completed', 'stopped',
     'hub-completed', 'control-completed', 'source-completed', 'effective'})
+_SOURCE_HISTORY_DOMAIN = b'e2x-cps-source-receipt-set/v1\0'
+_HUB_HISTORY_DOMAIN = b'e2x-cps-hub-operation-set/v1\0'
+
+
+def _history_ref_hash(domain, rows, *, journal=False):
+    digest = hashlib.sha256(domain)
+    count = 0
+    import json
+    for row in rows:
+        row = tuple(row)
+        if len(row) != (3 if journal else 2):
+            raise ValueError('Managed Source history malformed')
+        if not _uuid(row[0]) or not _digest(row[1]):
+            raise ValueError('Managed Source history malformed')
+        if len(row) == 3 and row[2] not in _JOURNAL_STATES:
+            raise ValueError('Managed Source journal history malformed')
+        encoded = json.dumps(list(row), ensure_ascii=False,
+            separators=(',', ':')).encode('utf-8')
+        digest.update(len(encoded).to_bytes(8, 'big') + encoded)
+        count += 1
+    return count, 'sha256:' + digest.hexdigest()
 
 
 def _uuid(value):
@@ -68,34 +89,51 @@ def _local_observation(provider, console):
 
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        receipts = []
         if 'pool_source_receipt' not in tables:
             raise ValueError('Managed Source receipt history missing')
-        rows = db.execute('SELECT transition_id,input_sha256 FROM pool_source_receipt '
-            'ORDER BY rowid DESC LIMIT ?', (MAX_HISTORY + 1,)).fetchall()
-        truncated = len(rows) > MAX_HISTORY
-        for transition_id, input_hash in reversed(rows[:MAX_HISTORY]):
-            if not _uuid(transition_id) or not _digest(input_hash):
-                raise ValueError('Managed Source receipt history malformed')
-            receipts.append({'transition_id': transition_id, 'input_sha256': input_hash})
+        receipt_count, receipt_hash = _history_ref_hash(
+            _SOURCE_HISTORY_DOMAIN,
+            db.execute('SELECT transition_id,input_sha256 FROM pool_source_receipt '
+                'ORDER BY transition_id'))
+        receipts = [dict(transition_id=row[0], input_sha256=row[1])
+            for row in reversed(db.execute('SELECT transition_id,input_sha256 '
+                'FROM pool_source_receipt ORDER BY rowid DESC LIMIT ?',
+                (MAX_HISTORY,)).fetchall())]
 
         operations = []
         if 'hub_journal_operation' in tables:
-            rows = db.execute('SELECT operation_id,input_sha256,state FROM hub_journal_operation '
-                'ORDER BY rowid DESC LIMIT ?', (MAX_HISTORY + 1,)).fetchall()
-            truncated = truncated or len(rows) > MAX_HISTORY
-            for operation_id, input_hash, state in reversed(rows[:MAX_HISTORY]):
-                if (not _uuid(operation_id) or not _digest(input_hash)
-                        or state not in _JOURNAL_STATES):
-                    raise ValueError('Managed Source journal history malformed')
-                operations.append({'operation_id': operation_id,
-                    'input_sha256': input_hash, 'state': state})
+            from .hub_journal import SourceHubJournal
+            journal = getattr(provider, 'hub_journal', None)
+            if (type(journal) is not SourceHubJournal or journal.provider is not provider
+                    or journal._db is not db):
+                raise ValueError('Managed Source journal owner unavailable')
+            # Reuse the installed journal's complete original codec/schema check
+            # inside this read transaction; do not call an API that opens another.
+            journal._validate()
+            operation_count, operation_hash = _history_ref_hash(
+                _HUB_HISTORY_DOMAIN,
+                db.execute('SELECT operation_id,input_sha256,state FROM '
+                    'hub_journal_operation ORDER BY operation_id'), journal=True)
+            operations = [dict(operation_id=row[0], input_sha256=row[1], state=row[2])
+                for row in reversed(db.execute('SELECT operation_id,input_sha256,state '
+                    'FROM hub_journal_operation ORDER BY rowid DESC LIMIT ?',
+                    (MAX_HISTORY,)).fetchall())]
+        else:
+            if getattr(provider, 'hub_journal', None) is not None:
+                raise ValueError('Managed Source journal schema missing')
+            operation_count, operation_hash = _history_ref_hash(
+                _HUB_HISTORY_DOMAIN, (), journal=True)
+        truncated = receipt_count > MAX_HISTORY or operation_count > MAX_HISTORY
         return {
             'source': {'console': console, 'database_id': identity[0][2],
                 'source_path_sha256': 'sha256:' + hashlib.sha256(source_path.encode()).hexdigest(),
                 'user_version': user_version, 'schema_sha256': schema_hash},
             'retained': {'source_receipts': receipts,
-                'hub_operations': operations, 'truncated': truncated},
+                'hub_operations': operations, 'truncated': truncated,
+                'source_receipt_count': receipt_count,
+                'source_receipt_set_sha256': receipt_hash,
+                'hub_operation_count': operation_count,
+                'hub_operation_set_sha256': operation_hash},
             'guard': guard,
         }
     finally:

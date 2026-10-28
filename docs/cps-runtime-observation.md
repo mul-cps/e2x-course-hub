@@ -18,7 +18,13 @@ The version-1 `e2x-cps-source-runtime-observation/v1` response contains:
 - `writer_guard`: locally validated installation/binding flags and the bound
   coordinator database UUID. It does not report remote coordinator readiness.
 - `retained`: up to 32 Source receipt references and 32 Hub-journal operation
-  references (IDs/input hashes/states), with an explicit truncation flag.
+  references (IDs/input hashes/states), with an explicit truncation flag. It
+  also includes `source_receipt_count` and `hub_operation_count`, plus complete
+  `source_receipt_set_sha256` and `hub_operation_set_sha256` digests. Each digest
+  is domain-separated and covers the ordered, compact-JSON reference tuples
+  using an eight-byte big-endian length prefix per tuple. The counts and digests
+  are streamed from the full validated local sets in the same read transaction;
+  the response arrays remain bounded to 32 references each.
 
 Reads use the installed `LocalCourseProvider` and `PoolMutationRPCGuard` in a
 single local read transaction. An absent/changed guard, malformed schema or
@@ -26,7 +32,7 @@ history, or an existing transaction fails closed with 503. No schema migration,
 network call, enrollment, grant change or journal mutation occurs. Raw paths,
 SQL data, receipt results, operation intents and tokens are not returned.
 
-The history window is bounded, not evidence of complete backup custody. It must
-not be used as proof that a workspace stopped, a GPU allowance was released or
-a production activation completed. The coordinator must independently validate
-its installed process/storage bindings and complete retained history.
+The full local history digests do not verify an independent retained backup or
+prove that a workspace stopped, a GPU allowance was released or a production
+activation completed. The coordinator must independently validate its installed
+process/storage bindings, complete retained history and backup custody.
