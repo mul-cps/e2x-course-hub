@@ -1,0 +1,18 @@
+{
+  "image": "ghcr.io/mul-cps/e2x-course-hub@sha256:478ec4f55f4a10ae9b04c7ddb7792c041cbe36556911a3661e64f59e2527f126",
+  "source": "https://github.com/mul-cps/e2x-course-hub",
+  "source_code_revision": "10d4a8e82225c60d4455c572c25c62d9a27b964b",
+  "base": "ghcr.io/mul-cps/e2x-course-hub@sha256:b6856fa9c0ac1ddd42541c5bb629ee31ff8a5fd7420cd152548d6fdc8edde7b7",
+  "workspaces_sha256": "4fc27138f79d4054f1bf7aaa9f5da436a9f0ee83c1df9824934da6b23054eeeb",
+  "remote_digest_verified": "sha256:478ec4f55f4a10ae9b04c7ddb7792c041cbe36556911a3661e64f59e2527f126",
+  "source_branch": "fix/stopped-absent-shares-20261117",
+  "source_full_suite": "377 passed,529 subtests",
+  "installed_causal_red_green": true,
+  "installed_new_cases": "8 passed,25 subtests",
+  "same_other_modules": 51,
+  "same_base_layers": 70,
+  "extra_layers": 1,
+  "operator_managed_delivery": true,
+  "new_fleet_adoption": false,
+  "live_rollout_and_supported_retry": "Root-owned separate acceptance gate"
+}
