@@ -42,7 +42,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
                 outer.calls.append('spawn')
                 if outer.spawn_failure:raise RuntimeError('lost response')
             async def sync_group(self,workspace,members):outer.calls.append('sync')
-            async def replace_shares(self,*args):outer.calls.append('shares')
+            async def replace_shares(self,*args,**kwargs):outer.calls.append('shares')
             async def revoke_shares(self,*args):outer.calls.append('revoke')
             async def remove_users_from_group(self,*args):outer.calls.append('remove')
         class Filesystem:
@@ -274,7 +274,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         await self.provider.put('memberships',{'id':'m2','course_id':'c','group_id':'g',
             'person_id':'remaining','canonical_person_id':person},actor='admin')
         original_shares=self.hub.replace_shares
-        async def failed_shares(*args):
+        async def failed_shares(*args,**kwargs):
             raise RuntimeError('lost Shares response after group removal')
         self.hub.replace_shares=failed_shares
         with self.assertRaisesRegex(RuntimeError,'lost Shares'):

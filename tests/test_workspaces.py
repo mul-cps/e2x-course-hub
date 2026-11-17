@@ -36,7 +36,7 @@ class WorkspaceTests(unittest.TestCase):
                     calls.append('stop')
                     if stop_failure:raise TimeoutError()
                 async def remove_users_from_group(self,*args):calls.append('revoke')
-                async def replace_shares(self,*args):calls.append('shares')
+                async def replace_shares(self,*args,**kwargs):calls.append('shares')
                 async def sync_group(self,*args):calls.append('sync')
                 async def start(self,*args):calls.append('spawn')
             hub=Hub();hub.hub=hub

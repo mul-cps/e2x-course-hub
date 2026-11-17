@@ -246,11 +246,11 @@ class CourseStartConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.service.get(workspace['id']))['state'], 'starting')
             self.calls.append('spawn:' + workspace['id'])
 
-        async def shares(workspace, group):
+        async def shares(workspace, group, **kwargs):
             if workspace['id'] == 'w' and not published.is_set():
                 publishing.set()
                 await published.wait()
-            await original_shares(workspace, group)
+            await original_shares(workspace, group, **kwargs)
 
         self.hub.start, self.hub.replace_shares = spawn, shares
         start = self.task(self.service.start('w', actor='teacher'))
@@ -273,11 +273,11 @@ class CourseStartConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         publishing = asyncio.Event()
         original_shares = self.hub.replace_shares
 
-        async def shares(workspace, group):
+        async def shares(workspace, group, **kwargs):
             if not publishing.is_set():
                 publishing.set()
                 await asyncio.Event().wait()
-            await original_shares(workspace, group)
+            await original_shares(workspace, group, **kwargs)
 
         self.hub.replace_shares = shares
         start = self.task(self.service.start('w', actor='teacher'))

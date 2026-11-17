@@ -92,7 +92,7 @@ class HubWorkspaceAdapter:
             if server is None: return True
             await asyncio.sleep(min(.2,max(0,deadline-asyncio.get_running_loop().time())))
 
-    async def replace_shares(self, workspace, group):
+    async def replace_shares(self, workspace, group, *, allow_absent=False):
         user = quote(workspace['hub_user'],safe='')
         server = quote(workspace['hub_server'],safe='')
         url = self.hub.api_url.rstrip('/') + f'/shares/{user}/{server}'
@@ -100,7 +100,27 @@ class HubWorkspaceAdapter:
         try: await self.hub.request(url,'DELETE')
         except HTTPClientError as error:
             if error.code != 404: raise
-        await self.hub.request(url,'POST',json.dumps({'group':group,'scopes':['access:servers']}))
+        try:
+            await self.hub.request(url,'POST',json.dumps({'group':group,'scopes':['access:servers']}))
+        except HTTPClientError as error:
+            if allow_absent is not True or error.code != 404:
+                raise
+            # Only a native missing-server response after confirmed shutdown may
+            # defer publication until the normal Start recreates the named row.
+            try:
+                missing = json.loads(error.response.body)
+            except (AttributeError, TypeError, ValueError):
+                raise error
+            if missing != {'status':404,'message':f"No such server: {workspace['hub_user']}/{workspace['hub_server']}"}:
+                raise
+            response = await self.hub.request(self.hub.api_url.rstrip('/') +
+                f'/users/{user}?include_stopped_servers=1')
+            current = json.loads(response.body)
+            if (not isinstance(current,dict) or current.get('name') != workspace['hub_user']
+                    or not isinstance(current.get('servers'),dict)
+                    or workspace['hub_server'] in current['servers']):
+                raise RuntimeError('Exact stopped named-server absence required before deferring Shares')
+
 
     async def revoke_shares(self, workspace):
         user = quote(workspace['hub_user'],safe='')
@@ -577,7 +597,7 @@ class WorkspaceService:
             if membership:
                 await self.hub.hub.remove_users_from_group(target['group_id'],[membership['person_id']])
             for workspace in affected:
-                await self.hub.replace_shares(workspace,target['group_id'])
+                await self.hub.replace_shares(workspace,target['group_id'],allow_absent=True)
             if membership:
                 await self.provider.delete('memberships',membership_id,actor=actor)
             for workspace in affected:
