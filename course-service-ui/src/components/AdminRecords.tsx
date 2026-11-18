@@ -1125,12 +1125,19 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
             aria-label={`${titles[kind]} records`}
             tabIndex={0}
           >
-            <table className="records-table">
+            <table
+              className={`records-table ${kind === "workspaces" ? "workspace-records-table" : ""}`}
+            >
               <thead>
                 <tr>
                   {columns.map((c) => (
                     <th
                       key={c}
+                      className={
+                        kind === "workspaces" && c === "notice"
+                          ? "workspace-notice"
+                          : undefined
+                      }
                       aria-sort={
                         sort?.key === c
                           ? sort.ascending
@@ -1167,7 +1174,7 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       <td
                         key={c}
                         title={display(r[c])}
-                        className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""}`}
+                        className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""} ${kind === "workspaces" && c === "notice" ? "workspace-notice" : ""}`}
                       >
                         {c === "account_state" ? (
                           display(
@@ -1222,7 +1229,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                         )}
                       </td>
                     ))}
-                    <td>
+                    <td
+                      className={kind === "workspaces" ? "workspace-actions" : undefined}
+                    >
                       <div className="row-actions">
                         {kind !== "audit" && (
                           <details>

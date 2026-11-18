@@ -1108,6 +1108,30 @@ button:focus-visible {
   position: relative;
 }
 
+/* Keep workspace notices readable alongside their independent action area. */
+.workspace-records-table .workspace-notice {
+  min-width: 18rem;
+  width: 24rem;
+  overflow-wrap: break-word;
+  word-break: normal;
+  line-height: 1.6;
+}
+.workspace-records-table .workspace-actions {
+  min-width: 18rem;
+  width: 20rem;
+}
+.workspace-records-table .row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.workspace-records-table .row-actions > details,
+.workspace-records-table .row-actions > button {
+  flex-shrink: 0;
+}
+.workspace-records-table .row-actions summary {
+  white-space: nowrap;
+}
+
 /* Operator-published sharing status on compute and shared workspace pages. */
 .platform-status-panel {
   background: #fff;
