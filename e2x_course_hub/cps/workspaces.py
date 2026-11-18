@@ -295,8 +295,11 @@ class WorkspaceService:
 
     async def members(self, workspace):
         from .expiry import active
-        records = [r for r in await self.provider.members(workspace['course_id']) if active(r)]
-        people = [r.get('canonical_person_id') for r in records if r.get('group_id') == workspace['group_id']]
+        records = [r for r in await self.provider.members(workspace['course_id'])
+                   if active(r) and r.get('group_id') == workspace['group_id']]
+        if not records:
+            raise ValueError('Workspace has no active group members. Update its course roster before starting.')
+        people = [r.get('canonical_person_id') for r in records]
         if hasattr(self.provider,'db'):
             from .identity import resolve_membership_person
             people = [resolve_membership_person(self.provider,record) for record in records

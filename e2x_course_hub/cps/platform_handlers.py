@@ -84,6 +84,20 @@ class WorkspaceAccountAdoptionHandler(RecordsHandler):
 
 
 class WorkspaceHandler(RecordsHandler):
+    def write_error(self, status_code, **kwargs):
+        info = kwargs.get('exc_info')
+        error = info[1] if info else None
+        if 400 <= status_code < 500 and isinstance(error, web.HTTPError) and error.reason:
+            # These reasons are the existing controlled lifecycle/policy messages.
+            # Preserve them for the browser's RFC 9457 client, without a traceback.
+            from http.client import responses
+            self.set_header('Content-Type', 'application/problem+json')
+            self.set_header('Cache-Control', 'no-store')
+            self.finish(json.dumps({'type': 'about:blank', 'title': responses.get(status_code, 'Error'),
+                                    'status': status_code, 'detail': error.reason}))
+            return
+        super().write_error(status_code, **kwargs)
+
     def upstream_failure(self, status, action):
         # An upstream conflict alone proves neither an entitlement denial nor
         # a placement timeout. Never relay private upstream messages or bodies.

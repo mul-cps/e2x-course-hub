@@ -94,7 +94,7 @@ class RecordsHandler(BaseAPIHandler):
             groups = {data.get('group_id'),previous.get('group_id')}
             workspaces = await self.settings['course_provider'].list('workspaces')
             identity_fields = ('course_id','group_id','person_id','canonical_person_id')
-            if previous and any(w.get('group_id') == previous.get('group_id') for w in workspaces) and any(data.get(k) != previous.get(k) for k in identity_fields):
+            if previous and any(w.get('group_id') == previous.get('group_id') for w in workspaces) and any(data.get(k, previous.get(k)) != previous.get(k) for k in identity_fields):
                 raise web.HTTPError(409,reason='Referenced membership identity changes require controlled removal/reassignment')
             if any(w.get('group_id') in groups and w.get('state') != 'stopped' for w in workspaces):
                 raise web.HTTPError(409,reason='Stop affected shared workspace before changing membership')
