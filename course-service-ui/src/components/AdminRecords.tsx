@@ -190,6 +190,24 @@ const display = (v: unknown): string =>
             .map(([k, val]) => `${k}: ${display(val)}`)
             .join(" · ")
         : String(v);
+function workspaceNotice(workspace: Row): string {
+  if (
+    workspace.notice != null &&
+    (typeof workspace.notice !== "string" || workspace.notice.trim())
+  ) {
+    return display(workspace.notice);
+  }
+  switch (workspace.state) {
+    case "starting":
+      return "Starting workspace…";
+    case "stopping":
+      return "Stopping workspace…";
+    case "reconciling":
+      return "Workspace cleanup is being reconciled.";
+    default:
+      return "No additional notices.";
+  }
+}
 function execution(profile: Row): string {
   const gpu =
     profile.gpu && typeof profile.gpu === "object"
@@ -1173,10 +1191,16 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                     {columns.map((c, j) => (
                       <td
                         key={c}
-                        title={display(r[c])}
+                        title={
+                          kind === "workspaces" && c === "notice"
+                            ? workspaceNotice(r)
+                            : display(r[c])
+                        }
                         className={`${j === 0 ? "record-title" : ""} ${c === "id" ? "record-id" : ""} ${kind === "workspaces" && c === "notice" ? "workspace-notice" : ""}`}
                       >
-                        {c === "account_state" ? (
+                        {kind === "workspaces" && c === "notice" ? (
+                          workspaceNotice(r)
+                        ) : c === "account_state" ? (
                           display(
                             (
                               {
