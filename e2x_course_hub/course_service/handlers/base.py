@@ -115,7 +115,7 @@ class BaseTemplateHandler(BaseHandler):
                 "base_url": self.settings.get("base_url", "/"),
                 "service_prefix": service_prefix,
                 "api_url": ujoin(service_prefix, "api"),
-                "static_url": self.settings.get("static_url"),
+                "static_url": self.static_url,
                 "user": {
                     "name": user_model.get("name") if user_model else None,
                     "admin": user_model.get("admin", False) if user_model else False,

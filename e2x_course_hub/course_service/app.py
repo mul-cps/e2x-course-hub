@@ -177,6 +177,8 @@ class CourseServiceApp(Application):
             "jinja_env": jinja_env,
             "cookie_secret": os.urandom(32),
             "service_prefix": self.service_prefix.rstrip("/"),
+            "static_path": self.static_path,
+            "static_url_prefix": ujoin(self.service_prefix, "static/"),
         }
         self.tornado_settings = settings
 

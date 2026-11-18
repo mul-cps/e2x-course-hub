@@ -1230,7 +1230,9 @@ export default function AdminRecords({ kind }: { kind: Kind }) {
                       </td>
                     ))}
                     <td
-                      className={kind === "workspaces" ? "workspace-actions" : undefined}
+                      className={
+                        kind === "workspaces" ? "workspace-actions" : undefined
+                      }
                     >
                       <div className="row-actions">
                         {kind !== "audit" && (
