@@ -120,7 +120,8 @@ class StopTests(unittest.IsolatedAsyncioTestCase):
         releases=[c for c in self.calls if c[0]=='release']
         self.assertEqual(len(releases),2)
         self.assertTrue(all(c[1]['attempt']=='attempt-1' for c in releases))
-        self.assertEqual(sum(c[0]=='server' for c in self.calls),2)
+        # One optional identity observation cannot change the typed cleanup loop.
+        self.assertEqual(sum(c[0]=='server' for c in self.calls),3)
         self.assertFalse(self.active)
 
     async def test_timeout_retains_pending_notice_and_blocks_start_until_later_normal_stop(self):

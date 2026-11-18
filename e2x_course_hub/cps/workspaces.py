@@ -1,5 +1,7 @@
 """Service-controlled shared GPU workspace lifecycle and access reconciliation."""
 import asyncio
+from copy import deepcopy
+from datetime import datetime
 import json
 import math
 import logging
@@ -8,7 +10,7 @@ from contextlib import AsyncExitStack
 from urllib.parse import quote
 from tornado.httpclient import HTTPClientError
 from ..api.errors import HubAPIError
-from .compute import NativeCleanupPending
+from .compute import NativeCleanupPending, is_shutdown_conflict
 from .course_locks import CourseOperationLock
 
 def audited_lifecycle(method):
@@ -64,6 +66,17 @@ class HubWorkspaceAdapter:
         if not isinstance(user.get('servers'),dict):
             raise RuntimeError('Hub server status unavailable; lifecycle cannot be confirmed')
         return user['servers'].get(workspace['hub_server'])
+
+    async def owner_identity(self, workspace, *, stopped=False):
+        """An optional, incarnation-bound observation for release reconciliation."""
+        user = await self.hub.get_user(workspace['hub_user'])
+        if (not isinstance(user, dict) or user.get('name') != workspace['hub_user']
+                or not isinstance(user.get('created'), str) or not isinstance(user.get('servers'), dict)):
+            raise ValueError('Hub owner identity unavailable')
+        created = datetime.fromisoformat(user['created'].replace('Z', '+00:00'))
+        if created.tzinfo is None or (stopped and workspace['hub_server'] in user['servers']):
+            raise ValueError('Hub owner incarnation or stopped state unconfirmed')
+        return (user['name'], user['created'])
 
     async def assert_stopped(self, workspace):
         if await self.server_status(workspace) is not None:
@@ -616,24 +629,64 @@ class WorkspaceService:
         if cancellation is not None:
             cancellation.set()
         async with self.locks.setdefault(identifier,asyncio.Lock()):
-            workspace = await self.get(identifier)
-            reservation = await self.compute.reservation_state(identifier)
+            workspace = deepcopy(await self.get(identifier))
+            # Preserve the existing mandatory attempt capture. Only the NEW
+            # owner observation is optional for concurrent-release recovery.
+            reservation = deepcopy(await self.compute.reservation_state(identifier))
+            context = None
+            try:
+                if (isinstance(reservation, dict) and set(reservation) == {'workspace', 'active', 'attempt'}
+                        and reservation['workspace'] == identifier and reservation['active'] is True
+                        and isinstance(reservation['attempt'], str) and reservation['attempt']):
+                    context = (deepcopy(workspace), await self.hub.owner_identity(workspace),
+                               self.provider.lifecycle_snapshot(workspace['course_id']))
+            except Exception:
+                context = None
             await self.hub.stop_confirmed(workspace)
-            workspace = await self._release_after_cleanup(workspace, actor=actor,
-                attempt=reservation.get('attempt'), archive=archive)
+            attempt = reservation.get('attempt')
+            workspace, reconciled_lifecycle = await self._release_after_cleanup(workspace, actor=actor,
+                attempt=attempt, archive=archive, context=context)
             # No filesystem permission claim: external archive operation must stop all other writers too.
             await self.hub.revoke_shares(workspace)
+            if reconciled_lifecycle is not None and await self.get(identifier) != workspace:
+                raise ValueError('Workspace changed before reconciled close')
+            kwargs = {'expected_lifecycle': reconciled_lifecycle} if reconciled_lifecycle is not None else {}
             await self.provider.put('workspaces',{**workspace,'state':'stopped','notice':None,
-                'archive_pending':archive or workspace.get('archive_pending',False)},actor=actor)
+                'archive_pending':archive or workspace.get('archive_pending',False)},actor=actor,**kwargs)
 
-    async def _release_after_cleanup(self, workspace, *, actor, attempt, archive):
+    async def _reconcile_completed_release(self, identifier, context, error):
+        baseline, owner, lifecycle = context
+        # A concurrent trusted Hub finalizer may have completed this exact
+        # release. Reconcile its outcome; never retry the failed POST.
+        for _ in range(2):
+            if await self.get(identifier) != baseline:
+                raise ValueError('Workspace changed during release reconciliation') from error
+            if await self.hub.owner_identity(baseline, stopped=True) != owner:
+                raise ValueError('Hub owner changed during release reconciliation') from error
+            reservation = await self.compute.reservation_state(identifier)
+            if (not isinstance(reservation, dict) or set(reservation) != {'workspace', 'active', 'attempt'}
+                    or reservation['workspace'] != identifier or reservation['active'] is not False
+                    or reservation['attempt'] is not None):
+                raise error
+        if (await self.get(identifier) != baseline
+                or self.provider.lifecycle_snapshot(baseline['course_id']) != lifecycle):
+            raise ValueError('Workspace lifecycle changed during release reconciliation') from error
+        return lifecycle
+
+    async def _release_after_cleanup(self, workspace, *, actor, attempt, archive, context=None):
         identifier = workspace['id']
         try:
             await self.compute.release_after_shutdown(identifier,confirmed_by_hub=True,actor=actor,attempt=attempt)
-            return workspace
+            return workspace, None
         except NativeCleanupPending as error:
             if error.workspace != identifier or error.attempt != attempt:
                 raise
+        except HTTPClientError as error:
+            # This catch surrounds ONLY the original release POST, never an
+            # observation, Hub request, or the typed pending-cleanup loop.
+            if not is_shutdown_conflict(error) or context is None:
+                raise
+            return workspace, await self._reconcile_completed_release(identifier, context, error)
         # This normal CRUD commits before sleeping. Hold only the workspace's
         # lifecycle lock; a pending Stop cannot admit another Start.
         pending = await self.provider.put('workspaces', {**workspace, 'state':'stopping',
@@ -664,7 +717,7 @@ class WorkspaceService:
                 raise TimeoutError('Trusted native GPU cleanup is unconfirmed; reservations retained. Retry Stop to recheck cleanup.')
             try:
                 await asyncio.wait_for(recheck(), remaining)
-                return pending
+                return pending, None
             except NativeCleanupPending as error:
                 if error.workspace != identifier or error.attempt != attempt:
                     raise

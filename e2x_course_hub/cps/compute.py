@@ -10,6 +10,31 @@ class NativeCleanupPending(HTTPClientError):
         super().__init__(409, 'Native GPU cleanup pending; reservations retained', response=response)
         self.workspace, self.attempt = workspace, attempt
 
+def _release_conflict_detail(error):
+    """Parse only the bounded native release response, without guessing errors."""
+    raw = getattr(error.response, 'body', None)
+    if error.code != 409 or not isinstance(raw, (bytes, str)) or len(raw) > 8192:
+        return None
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate cleanup response field')
+            result[key] = value
+        return result
+    def reject_constant(value):
+        raise ValueError('Nonfinite cleanup response value')
+    try:
+        body = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except (ValueError, UnicodeError):
+        return None
+    return body['detail'] if isinstance(body, dict) and set(body) == {'detail'} else None
+
+
+def is_shutdown_conflict(error):
+    return _release_conflict_detail(error) == 'Shutdown unconfirmed or invalid release'
+
+
 class ComputePolicyClient:
     def __init__(self, base_url, token, console):
         parsed = urlsplit(base_url)
@@ -84,25 +109,8 @@ class ComputePolicyClient:
         try:
             return await self._request('reservations/release', 'POST', {'workspace': workspace, 'attempt': attempt})
         except HTTPClientError as error:
-            raw = getattr(error.response, 'body', None)
-            if error.code != 409 or not isinstance(raw, (bytes, str)) or len(raw) > 8192:
-                raise
-            def unique_object(pairs):
-                result = {}
-                for key, value in pairs:
-                    if key in result:
-                        raise ValueError('Duplicate cleanup response field')
-                    result[key] = value
-                return result
-            def reject_constant(value):
-                raise ValueError('Nonfinite cleanup response value')
-            try:
-                body = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
-            except (ValueError, UnicodeError):
-                raise error from None
-            detail = body.get('detail') if isinstance(body, dict) else None
-            if (isinstance(body, dict) and set(body) == {'detail'}
-                    and isinstance(detail, dict) and set(detail) == {'version', 'code', 'workspace', 'attempt'}
+            detail = _release_conflict_detail(error)
+            if (isinstance(detail, dict) and set(detail) == {'version', 'code', 'workspace', 'attempt'}
                     and type(detail['version']) is int and detail['version'] == 1
                     and detail['code'] == 'native_cleanup_pending'
                     and isinstance(attempt, str) and bool(attempt)
