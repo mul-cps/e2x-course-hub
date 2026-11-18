@@ -10,12 +10,14 @@ export interface ApiError extends Error {
   };
 }
 
-const baseSettings: RequestInit = {
+// Authentication can rotate the readable cookie while the application stays open.
+// Read it when sending each request, rather than freezing it at module load.
+const baseSettings = (): RequestInit => ({
   credentials: "same-origin" as RequestCredentials,
   headers: {
     "X-XSRFToken": getCookie("_xsrf") || "",
   },
-};
+});
 
 const handleResponse = async (response: Response): Promise<unknown> => {
   let data: Record<string, unknown>;
@@ -61,7 +63,7 @@ export const requests = {
     options: Pick<RequestInit, "signal" | "cache"> = {},
   ): Promise<unknown> => {
     const settings: RequestInit = {
-      ...baseSettings,
+      ...baseSettings(),
       method: "GET",
       ...options,
     };
@@ -73,7 +75,7 @@ export const requests = {
   },
   post: async (url: string, data: unknown): Promise<unknown> => {
     const settings: RequestInit = {
-      ...baseSettings,
+      ...baseSettings(),
       method: "POST",
       body: JSON.stringify(data),
     };
@@ -82,7 +84,7 @@ export const requests = {
   },
   put: async (url: string, data: unknown): Promise<unknown> => {
     const settings: RequestInit = {
-      ...baseSettings,
+      ...baseSettings(),
       method: "PUT",
       body: JSON.stringify(data),
     };
@@ -91,7 +93,7 @@ export const requests = {
   },
   del: async (url: string, data: unknown): Promise<unknown> => {
     const settings: RequestInit = {
-      ...baseSettings,
+      ...baseSettings(),
       method: "DELETE",
       body: JSON.stringify(data),
     };
