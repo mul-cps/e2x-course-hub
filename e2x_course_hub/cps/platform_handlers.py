@@ -334,6 +334,20 @@ class IdentityMappingHandler(RecordsHandler):
                 raise web.HTTPError(400,reason='Account alias must preserve the exact owning Hub username')
         try:result=await self.settings['course_provider'].link_identities(data['mappings'],actor=actor)
         except (ValueError,TypeError,sqlite3.IntegrityError) as error:raise web.HTTPError(400,reason=str(error))
-        self.write({'linked':result})
+        from .canonical_link_publication import publish_source_reviews
+        reply = {'linked': result}
+        try:
+            published = await publish_source_reviews(self.settings['console_owner'], result)
+        except httpx.HTTPStatusError as error:
+            permanent = error.response.status_code == 409
+            self.set_status(409 if permanent else 503)
+            reply['gatewayPublication'] = 'conflict' if permanent else 'pending'
+        except (httpx.RequestError, OSError, ValueError):
+            self.set_status(503)
+            reply['gatewayPublication'] = 'pending'
+        else:
+            if published is not None:
+                reply['gatewayPublication'] = {'published': published}
+        self.write(reply)
 
 default_handlers.append((r'/api/identities',IdentityMappingHandler))

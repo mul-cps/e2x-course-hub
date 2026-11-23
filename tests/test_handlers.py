@@ -109,6 +109,38 @@ class HandlersTest(AsyncHTTPTestCase):
         self.assertEqual(result['review_actor'],'admin')
         self.assertEqual(self.provider.db.execute('SELECT count(*) FROM email_links').fetchone()[0],0)
 
+    def test_reviewed_alias_can_retry_gateway_without_changing_person(self):
+        from unittest.mock import patch
+        import httpx
+
+        person = '00000000-0000-4000-8000-000000000001'
+        row = {'hub': 'cps', 'username': 'old-name', 'person_id': person,
+               'authority': 'reviewed_account_alias', 'administrator_reviewed': True,
+               'review_reason': 'Reviewed Hub inventory'}
+        attempts = []
+
+        async def publish(source, linked):
+            stored = self.provider.db.execute(
+                'SELECT canonical_person_id FROM reviewed_account_aliases WHERE username=?', ('old-name',)
+            ).fetchone()
+            self.assertEqual(stored[0], person)
+            self.assertEqual(linked['old-name']['review_actor'], 'admin')
+            self.assertEqual(source, 'cps')
+            attempts.append(linked)
+            if len(attempts) == 1:
+                raise httpx.ConnectError('offline')
+            return ['old-name']
+
+        with patch('e2x_course_hub.cps.canonical_link_publication.publish_source_reviews', publish):
+            payload = json.dumps({'mappings': [row]})
+            pending = self.fetch('/identities', method='POST', body=payload)
+            self.assertEqual(pending.code, 503)
+            self.assertEqual(json.loads(pending.body)['gatewayPublication'], 'pending')
+            published = self.fetch('/identities', method='POST', body=payload)
+            self.assertEqual(published.code, 200)
+            self.assertEqual(json.loads(published.body)['gatewayPublication'], {'published': ['old-name']})
+        self.assertEqual(self.provider.db.execute('SELECT count(*) FROM reviewed_account_aliases').fetchone()[0], 1)
+
     def test_reviewed_alias_checks_current_admin_and_console_owner(self):
         row={'hub':'cps','username':'old-name','person_id':'00000000-0000-4000-8000-000000000001',
              'authority':'reviewed_account_alias','administrator_reviewed':True,'review_reason':'Reviewed Hub inventory'}
